@@ -1,0 +1,7 @@
+{
+  "name": "meli-precios",
+  "private": true,
+  "type": "module",
+  "scripts": { "monitor": "node job/monitor.mjs" },
+  "dependencies": { "pg": "^8.16.0" }
+}
