@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MELI Precios — Monitor de Competencia</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--txt:#1a1d21;--mut:#6b7280;--line:#e5e7eb;
+    --red:#dc2626;--red-bg:#fef2f2;--org:#d97706;--org-bg:#fffbeb;
+    --grn:#16a34a;--grn-bg:#f0fdf4;--blu:#2563eb;--blu-bg:#eff6ff;--yel-bg:#fef9c3}
+  *{box-sizing:border-box;margin:0}
+  body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);padding:16px}
+  h1{font-size:20px;margin-bottom:2px}
+  .sub{color:var(--mut);font-size:12px;margin-bottom:14px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+  .row-flex{display:flex;gap:12px;flex-wrap:wrap}
+  .row-flex>.panel{flex:1;min-width:280px}
+  .panel h3{font-size:13px;margin-bottom:6px}
+  .hint{font-size:11.5px;color:var(--mut)}
+  input[type=file],textarea{width:100%;font:inherit}
+  textarea{border:1px solid var(--line);border-radius:6px;padding:6px;height:64px;resize:vertical}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 12px;cursor:pointer}
+  button:hover{background:var(--bg)}
+  .stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;text-align:center}
+  .stat b{display:block;font-size:20px}
+  .stat span{font-size:11px;color:var(--mut)}
+  .stat.on{outline:2px solid var(--txt)}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  #q{border:1px solid var(--line);border-radius:8px;padding:6px 10px;width:260px;font:inherit}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut);text-align:left;padding:8px;border-bottom:2px solid var(--line);background:#fafafa;cursor:pointer;white-space:nowrap}
+  td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:hover td{background:#fafbfc}
+  tr.hoy td{background:var(--yel-bg)}
+  .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tag{display:inline-block;font-size:10.5px;font-weight:600;border-radius:5px;padding:1px 7px;margin:1px 2px 1px 0;white-space:nowrap}
+  .t-pisado{background:var(--red-bg);color:var(--red)}
+  .t-pvp{background:var(--org-bg);color:var(--org)}
+  .t-gana{background:var(--grn-bg);color:var(--grn)}
+  .t-opp{background:var(--blu-bg);color:var(--blu)}
+  .t-hoy{background:var(--yel-bg);color:#a16207}
+  .t-sincat{background:#f3f4f6;color:var(--mut)}
+  a{color:var(--blu);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .title-cell{max-width:340px}
+  .sku{font-family:ui-monospace,monospace;font-size:12px}
+  .diff-neg{color:var(--red);font-weight:600}
+  #empty{padding:30px;text-align:center;color:var(--mut)}
+  .foot{margin-top:10px;font-size:11px;color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>MELI Precios — Monitor de Competencia</h1>
+<div class="sub" id="meta">Cargando datos…</div>
+
+<div class="row-flex">
+  <div class="panel">
+    <h3>1 · PVP del mes (Excel)</h3>
+    <input type="file" id="xls" accept=".xlsx,.xls">
+    <div class="hint" id="pvpInfo">Subí la lista de precios tal cual te la mandan. Se guarda en este navegador.</div>
+  </div>
+  <div class="panel">
+    <h3>2 · Ofertas de HOY (SKU y precio de oferta)</h3>
+    <textarea id="ofertas" placeholder="Una por línea: SKU precio&#10;INCUT100-9  2990000&#10;L1000  39999"></textarea>
+    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+      <button id="saveOf">Guardar ofertas</button>
+      <span class="hint" id="ofInfo"></span>
+    </div>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="toolbar">
+  <input id="q" placeholder="Buscar SKU o título…">
+  <span class="hint" id="count"></span>
+</div>
+
+<table>
+  <thead><tr id="hdr">
+    <th data-k="flag">Estado</th>
+    <th data-k="sku">SKU</th>
+    <th data-k="title">Publicación</th>
+    <th data-k="myPrice" class="num">Mi precio</th>
+    <th data-k="pvp" class="num">PVP</th>
+    <th data-k="bestPrice" class="num">Mejor precio otro</th>
+    <th data-k="bestSeller">Quién</th>
+    <th data-k="cheaperCount" class="num">Me pisan</th>
+    <th data-k="totalSellers" class="num">Vendedores</th>
+  </tr></thead>
+  <tbody id="tb"></tbody>
+</table>
+<div id="empty" style="display:none">Sin resultados para este filtro.</div>
+<div class="foot">🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: el mejor precio del mercado está debajo del PVP · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie está debajo del PVP, hay lugar para ofertar · ⭐ filas amarillas: tus ofertas de hoy</div>
+
+<script>
+'use strict';
+const $ = (id)=>document.getElementById(id);
+const fmt = (n)=> n==null ? '—' : '$'+Math.round(n).toLocaleString('es-AR');
+const norm = (s)=> s ? String(s).toUpperCase().replace(/[^A-Z0-9]/g,'') : null;
+
+let DATA=null, ROWS=[], FILTER='all', SORTK='flagRank', SORTD=1, Q='';
+let PVP = JSON.parse(localStorage.getItem('pvp')||'{}');
+let PVPMETA = JSON.parse(localStorage.getItem('pvpMeta')||'null');
+let OFERTAS = JSON.parse(localStorage.getItem('ofertas')||'{}');
+
+fetch('data.json?'+Date.now()).then(r=>r.json()).then(d=>{ DATA=d; build(); }).catch(()=>{
+  $('meta').textContent='No se encontró data.json — corré el job o esperá la corrida diaria.';
+});
+
+$('xls').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = (e)=>{
+    try{
+      const wb = XLSX.read(e.target.result,{type:'array'});
+      const map={}; 
+      for(const name of wb.SheetNames){
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
+        let hi=-1, ci=-1, pi=-1;
+        for(let i=0;i<Math.min(rows.length,10);i++){
+          const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase());
+          const c=cells.findIndex(x=>x.trim()==='CODIGO');
+          const p=cells.findIndex(x=>x.replace(/\s+/g,' ').includes('PVP ON LINE') && !x.includes('CUOTAS'));
+          if(c>=0&&p>=0){hi=i;ci=c;pi=p;break;}
+        }
+        if(hi<0) continue;
+        for(let i=hi+1;i<rows.length;i++){
+          const sku=norm(rows[i]?.[ci]); const pvp=rows[i]?.[pi];
+          if(sku && typeof pvp==='number' && pvp>0) map[sku]=pvp;
+        }
+      }
+      if(!Object.keys(map).length) throw new Error('No encontré columnas CODIGO / PVP On line');
+      PVP=map; PVPMETA={file:f.name,date:new Date().toISOString(),count:Object.keys(map).length};
+      localStorage.setItem('pvp',JSON.stringify(PVP));
+      localStorage.setItem('pvpMeta',JSON.stringify(PVPMETA));
+      showPvpInfo(); build();
+    }catch(err){ $('pvpInfo').textContent='Error leyendo Excel: '+err.message; }
+  };
+  rd.readAsArrayBuffer(f);
+});
+function showPvpInfo(){
+  if(PVPMETA) $('pvpInfo').textContent=`✓ ${PVPMETA.count} PVP cargados (${PVPMETA.file}, ${new Date(PVPMETA.date).toLocaleDateString('es-AR')})`;
+}
+
+$('saveOf').addEventListener('click', ()=>{
+  const map={};
+  for(const line of $('ofertas').value.split('\n')){
+    const m=line.trim().match(/^(\S+)[\s;,\t]+\$?\s*([\d.,]+)/);
+    if(!m) continue;
+    const sku=norm(m[1]);
+    let p=m[2].replace(/\./g,'').replace(',','.');
+    if(sku && !isNaN(+p)) map[sku]=+p;
+  }
+  OFERTAS=map;
+  localStorage.setItem('ofertas',JSON.stringify(map));
+  localStorage.setItem('ofertasDate',new Date().toDateString());
+  showOfInfo(); build();
+});
+function showOfInfo(){
+  const n=Object.keys(OFERTAS).length;
+  $('ofInfo').textContent = n? `✓ ${n} ofertas cargadas`:'';
+}
+if(localStorage.getItem('ofertasDate')===new Date().toDateString()){
+  $('ofertas').value=Object.entries(OFERTAS).map(([k,v])=>k+'  '+v).join('\n');
+}else{ OFERTAS={}; }
+
+function build(){
+  if(!DATA) return;
+  $('meta').textContent=`Última corrida: ${new Date(DATA.generatedAt).toLocaleString('es-AR')} · ${DATA.totalItems} publicaciones (${DATA.withCatalog} con catálogo)`;
+  showPvpInfo(); showOfInfo();
+  const comboPvp=(cand)=>{
+    if(!cand) return null;
+    const parts=String(cand).split(/\s*(?:á|\+)\s*/i).map(norm).filter(Boolean);
+    if(parts.length<2) return null;
+    let sum=0;
+    for(const p of parts){ if(PVP[p]==null) return null; sum+=PVP[p]; }
+    return sum;
+  };
+  ROWS = DATA.rows.map(r=>{
+    const sku = r.sku;
+    let pvp = (sku ? PVP[sku] : null) ?? PVP[norm(r.model)] ?? comboPvp(r.skuRaw) ?? comboPvp(r.model) ?? null;
+    const oferta = (sku ? OFERTAS[sku] : null) ?? OFERTAS[norm(r.model)] ?? null;
+    const flags=[];
+    if(oferta!=null) flags.push('HOY');
+    if(r.catalog==null) flags.push('SINCAT');
+    else{
+      if(r.cheaperCount>0) flags.push('PISADO');
+      if(r.winning) flags.push('GANA');
+      if(pvp!=null && r.bestPrice!=null && r.bestPrice < pvp*0.995) flags.push('PVP');
+      if(pvp!=null && r.bestPrice!=null && r.bestPrice >= pvp*0.995 && r.myPrice >= pvp*0.995) flags.push('OPP');
+      if(oferta!=null && r.bestPrice!=null && r.bestPrice < oferta) flags.push('PISAOFERTA');
+    }
+    let rank=9;
+    if(flags.includes('PISAOFERTA')) rank=0;
+    else if(flags.includes('HOY')) rank=1;
+    else if(flags.includes('PISADO')) rank=2;
+    else if(flags.includes('PVP')) rank=3;
+    else if(flags.includes('OPP')) rank=4;
+    else if(flags.includes('GANA')) rank=6;
+    if(flags.includes('SINCAT')) rank=Math.max(rank,8);
+    return {...r, pvp, oferta, flags, flagRank:rank};
+  });
+  renderStats(); render();
+}
+
+function renderStats(){
+  const c=(f)=>ROWS.filter(r=>r.flags.includes(f)).length;
+  const defs=[
+    ['all','Todas',ROWS.length],
+    ['HOY','⭐ Ofertas hoy',c('HOY')],
+    ['PISADO','🔴 Me pisan',c('PISADO')],
+    ['PVP','🟠 Pisan PVP',c('PVP')],
+    ['OPP','🔵 Oportunidad',c('OPP')],
+    ['GANA','🟢 Ganando',c('GANA')],
+    ['SINCAT','Sin catálogo',c('SINCAT')],
+  ];
+  $('stats').innerHTML=defs.map(([k,l,n])=>`<div class="stat ${FILTER===k?'on':''}" data-f="${k}"><b>${n}</b><span>${l}</span></div>`).join('');
+  document.querySelectorAll('.stat').forEach(el=>el.onclick=()=>{FILTER=el.dataset.f;renderStats();render();});
+}
+
+$('q').addEventListener('input',(e)=>{Q=e.target.value.toUpperCase();render();});
+$('hdr').addEventListener('click',(e)=>{
+  const k=e.target.closest('th')?.dataset.k; if(!k) return;
+  const kk = k==='flag'?'flagRank':k;
+  if(SORTK===kk) SORTD*=-1; else {SORTK=kk;SORTD=1;}
+  render();
+});
+
+const TAG={PISADO:['t-pisado','🔴 PISADO'],PVP:['t-pvp','🟠 PISAN PVP'],GANA:['t-gana','🟢 GANANDO'],
+  OPP:['t-opp','🔵 OPORTUNIDAD'],HOY:['t-hoy','⭐ HOY'],PISAOFERTA:['t-pisado','⚠️ PISAN TU OFERTA'],SINCAT:['t-sincat','sin catálogo']};
+
+function render(){
+  let rows=ROWS;
+  if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
+  if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
+  rows=[...rows].sort((a,b)=>{
+    let va=a[SORTK],vb=b[SORTK];
+    if(va==null) return 1; if(vb==null) return -1;
+    if(typeof va==='string') return SORTD*va.localeCompare(vb);
+    return SORTD*(va-vb);
+  });
+  $('count').textContent=rows.length+' filas';
+  $('empty').style.display=rows.length?'none':'block';
+  $('tb').innerHTML=rows.map(r=>{
+    const diff = r.bestPrice!=null? r.myPrice-r.bestPrice : null;
+    return `<tr class="${r.flags.includes('HOY')?'hoy':''}">
+      <td>${r.flags.map(f=>TAG[f]?`<span class="tag ${TAG[f][0]}">${TAG[f][1]}</span>`:'').join('')}</td>
+      <td class="sku">${r.skuRaw??r.model??'—'}${r.oferta!=null?`<br><span class="hint">oferta: ${fmt(r.oferta)}</span>`:''}</td>
+      <td class="title-cell"><a href="${r.link}" target="_blank">${r.title}</a></td>
+      <td class="num">${fmt(r.myPrice)}</td>
+      <td class="num">${fmt(r.pvp)}</td>
+      <td class="num">${fmt(r.bestPrice)}${diff!=null&&diff>0?`<br><span class="diff-neg">${fmt(diff)} abajo tuyo</span>`:''}</td>
+      <td>${r.bestSeller?`<a href="${r.bestLink}" target="_blank">${r.bestSeller}</a>`:'—'}</td>
+      <td class="num">${r.cheaperCount??'—'}</td>
+      <td class="num">${r.totalSellers??'—'}</td>
+    </tr>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
