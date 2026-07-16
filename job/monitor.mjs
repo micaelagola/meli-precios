@@ -137,6 +137,12 @@ async function apiGet(p, retries = 3) {
 const normSku = (s) => (s ? String(s).toUpperCase().replace(/[^A-Z0-9]/g, '') : null);
 const itemLink = (id) => `https://articulo.mercadolibre.com.ar/${id.slice(0, 3)}-${id.slice(3)}`;
 
+const STATE_FILE = process.env.STATE_FILE || null;
+let STATE = null;
+if (STATE_FILE && fs.existsSync(STATE_FILE)) {
+  try { STATE = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
+}
+
 async function main() {
   const t0 = Date.now();
   await db.connect();
@@ -148,6 +154,23 @@ async function main() {
   const SELLER_ID = Number(seller);
   console.log(`[monitor] seller ${SELLER_ID}`);
 
+  // Cache de catálogos + checkpoint (reanudable si el proceso se corta)
+  const catCache = new Map();
+  const nickCache = new Map();
+  if (STATE?.cat) {
+    for (const [k, v] of Object.entries(STATE.cat)) catCache.set(k, v);
+    console.log(`[monitor] checkpoint: ${catCache.size} catálogos ya consultados`);
+  }
+  function saveState() {
+    if (!STATE_FILE) return;
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ items, cat: Object.fromEntries(catCache) }));
+  }
+
+  let items = [];
+  if (STATE?.items?.length) {
+    items = STATE.items;
+    console.log(`[monitor] checkpoint: ${items.length} items ya relevados (salteo fases 1-2)`);
+  } else {
   // 1. Scan de publicaciones activas (search_type=scan soporta >1000)
   let ids = [];
   let scroll = null;
@@ -165,7 +188,6 @@ async function main() {
   console.log(`[monitor] ${ids.length} publicaciones activas`);
 
   // 2. Detalles (multiget de a 20)
-  const items = [];
   for (let i = 0; i < ids.length; i += 20) {
     const d = await apiGet(
       `/items?ids=${ids.slice(i, i + 20).join(',')}` +
@@ -192,23 +214,34 @@ async function main() {
     await sleep(SLEEP_MS);
   }
   console.log(`[monitor] ${items.length} detalles obtenidos`);
+  saveState();
+  }  // fin fases 1-2
 
-  // 3. Competencia por producto de catálogo (con cache: varios items → mismo catálogo)
-  // Checkpoint opcional (STATE_FILE): permite reanudar si el proceso se corta.
-  const STATE_FILE = process.env.STATE_FILE || null;
-  const catCache = new Map();
-  const nickCache = new Map();
-  if (STATE_FILE && fs.existsSync(STATE_FILE)) {
-    try {
-      const st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      for (const [k, v] of Object.entries(st.cat ?? {})) catCache.set(k, v);
-      console.log(`[monitor] checkpoint: ${catCache.size} catálogos ya consultados`);
-    } catch {}
+  // 2.5 Precio REAL propio: /items/{id}/sale_price incluye promociones activas.
+  // El campo price del multiget es el precio "lleno" (tachado). Reanudable via spDone.
+  {
+    const pend = items.filter((it) => !it.spDone);
+    if (pend.length) console.log(`[monitor] sale_price pendientes: ${pend.length}`);
+    let done25 = 0;
+    const q25 = [...pend];
+    async function spWorker() {
+      while (q25.length) {
+        const it = q25.shift();
+        it.priceList = it.myPrice;   // precio lleno / tachado
+        try {
+          const sp = await apiGet(`/items/${it.itemId}/sale_price?context=channel_marketplace`);
+          if (sp?.amount != null) it.myPrice = sp.amount;
+          it.spDone = true;
+        } catch { it.spDone = true; }
+        done25++;
+        if (done25 % 100 === 0) { saveState(); console.log(`[monitor] sale_price ${done25}/${pend.length}`); }
+        await sleep(SLEEP_MS);
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, spWorker));
+    saveState();
   }
-  function saveState() {
-    if (!STATE_FILE) return;
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ cat: Object.fromEntries(catCache) }));
-  }
+
   async function getNick(sellerId) {
     if (nickCache.has(sellerId)) return nickCache.get(sellerId);
     try {
@@ -228,7 +261,41 @@ async function main() {
     return entry;
   }
 
-  const catalogIds = [...new Set(items.filter((x) => x.catalog).map((x) => x.catalog))]
+  // 3.5 Items SIN catálogo: buscar el producto de catálogo equivalente por título.
+  // Matching estricto (marca + solapamiento de palabras) para no comparar peras con manzanas.
+  const tokens = (str) => new Set(String(str).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .split(/[^A-Z0-9]+/).filter((w) => w.length >= 3));
+  const noCat = items.filter((x) => !x.catalog && x.catalogAprox === undefined);
+  if (noCat.length) console.log(`[monitor] buscando catálogo aprox para ${noCat.length} items sin catálogo`);
+  {
+    let done35 = 0;
+    const q35 = [...noCat];
+    async function searchWorker() {
+      while (q35.length) {
+        const it = q35.shift();
+        it.catalogAprox = null;
+        try {
+          const d = await apiGet(`/products/search?status=active&site_id=MLA&q=${encodeURIComponent(it.title.slice(0, 80))}`);
+          const tt = tokens(it.title);
+          for (const pr of (d.results ?? []).slice(0, 5)) {
+            const pt = tokens(pr.name);
+            const inter = [...tt].filter((w) => pt.has(w)).length;
+            const score = inter / Math.min(tt.size, pt.size);
+            const brandOk = !tt.has('LUSQTOFF') || pt.has('LUSQTOFF');
+            if (score >= 0.6 && brandOk) { it.catalogAprox = pr.id; break; }
+          }
+        } catch {}
+        done35++;
+        if (done35 % 50 === 0) { saveState(); console.log(`[monitor] búsqueda aprox ${done35}/${noCat.length}`); }
+        await sleep(SLEEP_MS);
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, searchWorker));
+    saveState();
+    console.log(`[monitor] matching aprox: ${items.filter((x) => x.catalogAprox).length} encontrados`);
+  }
+
+  const catalogIds = [...new Set(items.map((x) => x.catalog || x.catalogAprox).filter(Boolean))]
     .filter((cid) => !catCache.has(cid));
   console.log(`[monitor] ${catalogIds.length} productos de catálogo a consultar`);
 
@@ -251,6 +318,7 @@ async function main() {
   for (const it of items) {
     const row = {
       ...it,
+      matchType: it.catalog ? 'catalog' : (it.catalogAprox ? 'aprox' : null),
       totalSellers: null,   // vendedores del producto en catálogo
       bestPrice: null,      // precio más bajo del mercado (excluyéndonos)
       bestSeller: null,
@@ -259,9 +327,10 @@ async function main() {
       cheaperCount: null,   // cuántos venden más barato que nosotros
       winning: null,        // ¿somos el precio más bajo?
     };
-    if (it.catalog && catCache.get(it.catalog)) {
-      const entry = catCache.get(it.catalog);
-      const others = entry.results.filter((c) => c.seller_id !== SELLER_ID);
+    const cid = it.catalog || it.catalogAprox;
+    if (cid && catCache.get(cid)) {
+      const entry = catCache.get(cid);
+      const others = entry.results.filter((c) => c.seller_id !== SELLER_ID && c.item_id !== it.itemId);
       row.totalSellers = entry.total;
       row.cheaperCount = others.filter((c) => c.price < it.myPrice).length;
       row.winning = row.cheaperCount === 0;
@@ -291,6 +360,7 @@ async function main() {
     sellerId: SELLER_ID,
     totalItems: rows.length,
     withCatalog: rows.filter((r) => r.catalog).length,
+    withAprox: rows.filter((r) => !r.catalog && r.catalogAprox).length,
     rows,
   };
   fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });
