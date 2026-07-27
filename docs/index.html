@@ -29,6 +29,7 @@
   .stat.on{outline:2px solid var(--txt)}
   .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
   #q{border:1px solid var(--line);border-radius:8px;padding:6px 10px;width:260px;font:inherit}
+  #brand{border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit;background:var(--card)}
   table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   th{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut);text-align:left;padding:8px;border-bottom:2px solid var(--line);background:#fafafa;cursor:pointer;white-space:nowrap}
   td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -57,9 +58,10 @@
 
 <div class="row-flex">
   <div class="panel">
-    <h3>1 · PVP del mes (Excel)</h3>
-    <input type="file" id="xls" accept=".xlsx,.xls">
-    <div class="hint" id="pvpInfo">Subí la lista de precios tal cual te la mandan. Se guarda en este navegador.</div>
+    <h3>1 · Listas de PVP (Excel, uno por proveedor)</h3>
+    <input type="file" id="xls" accept=".xlsx,.xls" multiple>
+    <div class="hint" id="pvpInfo">Podés subir varias (Lusqtoff, BTA, …). Se acumulan y quedan guardadas en este navegador.</div>
+    <div style="margin-top:6px"><button id="clearPvp">Borrar listas</button></div>
   </div>
   <div class="panel">
     <h3>2 · Ofertas (Excel semanal "SCD OFERTAS")</h3>
@@ -78,6 +80,8 @@
 
 <div class="toolbar">
   <input id="q" placeholder="Buscar SKU o título…">
+  <select id="brand"><option value="">Todas las marcas</option></select>
+  <button id="exportBtn">⬇ Descargar Excel</button>
   <span class="hint" id="count"></span>
 </div>
 
@@ -85,6 +89,7 @@
   <thead><tr id="hdr">
     <th data-k="flag">Estado</th>
     <th data-k="sku">SKU</th>
+    <th data-k="brand">Marca</th>
     <th data-k="title">Publicación</th>
     <th data-k="myPrice" class="num">Mi precio</th>
     <th data-k="pvp" class="num">PVP</th>
@@ -108,6 +113,7 @@ const norm = (s)=> s ? String(s).toUpperCase().replace(/[^A-Z0-9]/g,'') : null;
 let DATA=null, ROWS=[], FILTER='all', SORTK='flagRank', SORTD=1, Q='';
 let PVP = JSON.parse(localStorage.getItem('pvp')||'{}');
 let PVPMETA = JSON.parse(localStorage.getItem('pvpMeta')||'null');
+let PVPFILES = JSON.parse(localStorage.getItem('pvpFiles')||'{}');
 let OFERTAS = JSON.parse(localStorage.getItem('ofertas')||'{}');
 let OFSHEETS = JSON.parse(localStorage.getItem('ofertasSheets')||'null'); // {hoja:{MLA:precio}}
 let OFMETA = JSON.parse(localStorage.getItem('ofertasMeta')||'null');
@@ -118,11 +124,18 @@ function activarOfertasDeHoy(){
   if(!OFSHEETS) return [];
   const day = new Date().getDate();
   const usadas = [];
-  for(const [name, map] of Object.entries(OFSHEETS)){
+  const nombres = Object.keys(OFSHEETS);
+  for(const name of nombres){
+    const map = OFSHEETS[name];
     const up = name.toUpperCase();
-    let use = up.includes('TODO EL MES');
-    const m = up.match(/SEMANA DEL\s*(\d+)\s*AL\s*(\d+)/);
-    if(m){ const a=+m[1], b=+m[2]; use = a<=b ? (day>=a && day<=b) : (day>=a || day<=b); }
+    // La primera hoja (o la que diga "TODO EL MES") vale siempre.
+    let use = up.includes('TODO EL MES') || name === nombres[0];
+    // Hojas semanales: "SEMANA DEL 6 AL 12", "SEMANA DE 27 AL 2", "SEMANA 20 AL 26"...
+    const m = up.match(/SEMANA\s*(?:DEL?)?\s*(\d{1,2})\s*AL?\s*(\d{1,2})/);
+    if(m && !up.includes('TODO EL MES')){
+      const a=+m[1], b=+m[2];
+      use = a<=b ? (day>=a && day<=b) : (day>=a || day<=b);  // semana que cruza de mes
+    }
     if(!use) continue;
     Object.assign(OFMLA, map);
     usadas.push(name+' ('+Object.keys(map).length+')');
@@ -138,21 +151,27 @@ $('ofx').addEventListener('change', (ev)=>{
       const wb = XLSX.read(e.target.result,{type:'array'});
       const sheets = {};
       for(const name of wb.SheetNames){
+        if(/ERROR/i.test(name)) continue;               // hoja de errores de MELI: ignorar
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
         let hi=-1, mi=-1, pi=-1;
-        for(let i=0;i<Math.min(rows.length,6);i++){
-          const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().trim().replace(/\s+/g,' '));
-          const mm=cells.findIndex(x=>x==='MLA');
+        for(let i=0;i<Math.min(rows.length,8);i++){
+          const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
+          const mm=cells.findIndex(x=>x==='MLA'||x.includes('ID DE PUBLICACION')||x.includes('ID PUBLICACION'));
+          if(mm<0) continue;
+          // Precio a comparar = PRECIO FINAL (lo que termina pagando el cliente).
+          // Fallback: PVP OFERTA. Nunca PVP LLENO.
           let pp=cells.findIndex(x=>x==='PRECIO FINAL');
           if(pp<0) pp=cells.findIndex(x=>x==='PVP OFERTA');
-          if(mm>=0&&pp>=0){hi=i;mi=mm;pi=pp;break;}
+          if(pp<0) pp=cells.findIndex(x=>x.includes('PRECIO FINAL'));
+          if(pp>=0){hi=i;mi=mm;pi=pp;break;}
         }
         if(hi<0) continue;
         const map={};
         for(let i=hi+1;i<rows.length;i++){
           const mla=String(rows[i]?.[mi]??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-          const price=rows[i]?.[pi];
-          if(/^MLA\d+$/.test(mla) && typeof price==='number' && price>0) map[mla]=price;
+          let price=rows[i]?.[pi];
+          if(typeof price==='string') price = +price.replace(/[^\d.,]/g,'').replace(/\./g,'').replace(',','.');
+          if(/^MLA\d{6,}$/.test(mla) && typeof price==='number' && isFinite(price) && price>0) map[mla]=price;
         }
         if(Object.keys(map).length) sheets[name]=map;
       }
@@ -171,38 +190,70 @@ fetch('data.json?'+Date.now()).then(r=>r.json()).then(d=>{ DATA=d; build(); }).c
 });
 
 $('xls').addEventListener('change', (ev)=>{
-  const f = ev.target.files[0]; if(!f) return;
-  const rd = new FileReader();
-  rd.onload = (e)=>{
-    try{
-      const wb = XLSX.read(e.target.result,{type:'array'});
-      const map={}; 
-      for(const name of wb.SheetNames){
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
-        let hi=-1, ci=-1, pi=-1;
-        for(let i=0;i<Math.min(rows.length,10);i++){
-          const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase());
-          const c=cells.findIndex(x=>x.trim()==='CODIGO');
-          const p=cells.findIndex(x=>x.replace(/\s+/g,' ').includes('PVP ON LINE') && !x.includes('CUOTAS'));
-          if(c>=0&&p>=0){hi=i;ci=c;pi=p;break;}
-        }
-        if(hi<0) continue;
-        for(let i=hi+1;i<rows.length;i++){
-          const sku=norm(rows[i]?.[ci]); const pvp=rows[i]?.[pi];
-          if(sku && typeof pvp==='number' && pvp>0) map[sku]=pvp;
-        }
+  const files = [...ev.target.files]; if(!files.length) return;
+  let pend = files.length;
+  const resumen = [];
+  for(const f of files){
+    const rd = new FileReader();
+    rd.onload = (e)=>{
+      try{
+        const wb = XLSX.read(e.target.result,{type:'array'});
+        const map = parsePvpWorkbook(wb);
+        const n = Object.keys(map).length;
+        if(!n) throw new Error('sin columnas de código/PVP reconocidas');
+        Object.assign(PVP, map);
+        PVPFILES[f.name] = n;
+        resumen.push(`${f.name}: ${n}`);
+      }catch(err){ resumen.push(`${f.name}: ERROR (${err.message})`); }
+      if(--pend===0){
+        PVPMETA={date:new Date().toISOString(),count:Object.keys(PVP).length};
+        localStorage.setItem('pvp',JSON.stringify(PVP));
+        localStorage.setItem('pvpFiles',JSON.stringify(PVPFILES));
+        localStorage.setItem('pvpMeta',JSON.stringify(PVPMETA));
+        build();
       }
-      if(!Object.keys(map).length) throw new Error('No encontré columnas CODIGO / PVP On line');
-      PVP=map; PVPMETA={file:f.name,date:new Date().toISOString(),count:Object.keys(map).length};
-      localStorage.setItem('pvp',JSON.stringify(PVP));
-      localStorage.setItem('pvpMeta',JSON.stringify(PVPMETA));
-      showPvpInfo(); build();
-    }catch(err){ $('pvpInfo').textContent='Error leyendo Excel: '+err.message; }
-  };
-  rd.readAsArrayBuffer(f);
+    };
+    rd.readAsArrayBuffer(f);
+  }
 });
+
+// Detecta el formato de cada hoja y devuelve {skuNormalizado: pvp}
+// Soporta: lista Lusqtoff (CODIGO / PVP On line) y lista BTA (Codigo / P.S.V. Meli).
+function parsePvpWorkbook(wb){
+  const map={};
+  for(const name of wb.SheetNames){
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
+    let hi=-1, ci=-1, pi=-1;
+    for(let i=0;i<Math.min(rows.length,12);i++){
+      const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
+      const c=cells.findIndex(x=>x==='CODIGO'||x==='CÓDIGO');
+      if(c<0) continue;
+      // 1) Lusqtoff: "PVP On line" (sin cuotas)
+      let p=cells.findIndex(x=>x.includes('PVP ON LINE') && !x.includes('CUOTAS'));
+      // 2) BTA: "P.S.V. Meli" (precio sugerido de venta en Meli)
+      if(p<0) p=cells.findIndex(x=>x.replace(/\./g,'').includes('PSV MELI'));
+      if(p>=0){hi=i;ci=c;pi=p;break;}
+    }
+    if(hi<0) continue;
+    for(let i=hi+1;i<rows.length;i++){
+      const sku=norm(rows[i]?.[ci]); const pvp=rows[i]?.[pi];
+      if(sku && typeof pvp==='number' && pvp>0) map[sku]=pvp;
+    }
+  }
+  return map;
+}
+
+$('clearPvp').addEventListener('click', ()=>{
+  PVP={}; PVPFILES={}; PVPMETA=null;
+  localStorage.removeItem('pvp'); localStorage.removeItem('pvpFiles'); localStorage.removeItem('pvpMeta');
+  build();
+});
+
 function showPvpInfo(){
-  if(PVPMETA) $('pvpInfo').textContent=`✓ ${PVPMETA.count} PVP cargados (${PVPMETA.file}, ${new Date(PVPMETA.date).toLocaleDateString('es-AR')})`;
+  const files = Object.entries(PVPFILES);
+  if(!files.length) return;
+  $('pvpInfo').innerHTML = `✓ ${Object.keys(PVP).length} PVP cargados — ` +
+    files.map(([f,n])=>`${f} (${n})`).join(' · ');
 }
 
 $('saveOf').addEventListener('click', ()=>{
@@ -264,15 +315,39 @@ function build(){
     else if(flags.includes('OPP')) rank=4;
     else if(flags.includes('GANA')) rank=6;
     if(flags.includes('SINCAT')) rank=Math.max(rank,8);
-    return {...r, pvp, oferta, flags, flagRank:rank};
+    return {...r, pvp, oferta, marca:marcaDe(r), flags, flagRank:rank};
   });
-  renderStats(); render();
+  renderBrands(); renderStats(); render();
+}
+
+function marcaDe(r){
+  if(r.brand && String(r.brand).trim()) return String(r.brand).trim().toUpperCase();
+  const t=(r.title||'').toUpperCase();
+  if(/LUSQTOFF|LÜSQTOFF/.test(t)) return 'LUSQTOFF';
+  if(/DOWEN|PAGIO/.test(t)) return 'DOWEN PAGIO';
+  if(/\bBTA\b/.test(t)) return 'BTA';
+  if(/WESTUL/.test(t)) return 'WESTUL';
+  return 'SIN MARCA';
+}
+
+function renderBrands(){
+  const cur=$('brand').value;
+  const marcas=[...new Set(ROWS.map(r=>r.marca))].sort();
+  $('brand').innerHTML='<option value="">Todas las marcas</option>'+
+    marcas.map(m=>`<option value="${m}">${m} (${ROWS.filter(r=>r.marca===m).length})</option>`).join('');
+  if(marcas.includes(cur)) $('brand').value=cur;
+}
+
+function baseRows(){
+  const b=$('brand').value;
+  return b ? ROWS.filter(r=>r.marca===b) : ROWS;
 }
 
 function renderStats(){
-  const c=(f)=>ROWS.filter(r=>r.flags.includes(f)).length;
+  const B=baseRows();
+  const c=(f)=>B.filter(r=>r.flags.includes(f)).length;
   const defs=[
-    ['all','Todas',ROWS.length],
+    ['all','Todas',B.length],
     ['HOY','⭐ Ofertas hoy',c('HOY')],
     ['PISADO','🔴 Me pisan',c('PISADO')],
     ['PVP','🟠 Pisan PVP',c('PVP')],
@@ -285,6 +360,7 @@ function renderStats(){
 }
 
 $('q').addEventListener('input',(e)=>{Q=e.target.value.toUpperCase();render();});
+$('brand').addEventListener('change',()=>{renderStats();render();});
 $('hdr').addEventListener('click',(e)=>{
   const k=e.target.closest('th')?.dataset.k; if(!k) return;
   const kk = k==='flag'?'flagRank':k;
@@ -296,8 +372,49 @@ const TAG={PISADO:['t-pisado','🔴 PISADO'],PVP:['t-pvp','🟠 PISAN PVP'],GANA
   OPP:['t-opp','🔵 OPORTUNIDAD'],HOY:['t-hoy','⭐ HOY'],PISAOFERTA:['t-pisado','⚠️ PISAN TU OFERTA'],
   APROX:['t-sincat','≈ similar'],SINCAT:['t-sincat','sin datos']};
 
+// Descarga: SKU, PVP, mi precio, y UNA FILA POR CADA competidor más barato.
+$('exportBtn').addEventListener('click', ()=>{
+  let rows=baseRows();
+  if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
+  if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
+  const out=[];
+  for(const r of rows){
+    const base={
+      SKU: r.skuRaw ?? r.model ?? '',
+      Marca: r.marca ?? '',
+      Publicacion: r.title,
+      'Mi link': r.link,
+      'Mi precio': r.myPrice,
+      'Precio lleno': r.priceList ?? '',
+      'Oferta hoy': r.oferta ?? '',
+      PVP: r.pvp ?? '',
+      Estado: r.flags.map(f=>TAG[f]?TAG[f][1].replace(/^\S+\s/,''):'').filter(Boolean).join(' / '),
+      'Total vendedores': r.totalSellers ?? '',
+      'Me pisan': r.cheaperCount ?? '',
+    };
+    const comps = r.cheapers ?? [];
+    if(!comps.length){
+      out.push({...base, 'Competidor': '', 'Precio competidor': '', 'Dif vs mi precio': '', 'Link competidor': ''});
+    }else{
+      comps.forEach((c,i)=>out.push({...base,
+        'Competidor': c.seller ?? c.sellerId,
+        'Precio competidor': c.price,
+        'Dif vs mi precio': Math.round((r.myPrice - c.price)*100)/100,
+        'Link competidor': c.link,
+      }));
+    }
+  }
+  const ws = XLSX.utils.json_to_sheet(out);
+  ws['!cols'] = [{wch:18},{wch:14},{wch:46},{wch:38},{wch:12},{wch:12},{wch:12},{wch:12},{wch:26},{wch:10},{wch:9},{wch:22},{wch:14},{wch:14},{wch:38}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Competencia');
+  const hoy = new Date().toISOString().slice(0,10);
+  const marca = ($('brand').value||'todas').replace(/[^A-Za-z0-9]+/g,'-').toLowerCase();
+  XLSX.writeFile(wb, `competencia_${marca}_${FILTER.toLowerCase()}_${hoy}.xlsx`);
+});
+
 function render(){
-  let rows=ROWS;
+  let rows=baseRows();
   if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
   if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
   rows=[...rows].sort((a,b)=>{
@@ -313,6 +430,7 @@ function render(){
     return `<tr class="${r.flags.includes('HOY')?'hoy':''}">
       <td>${r.flags.map(f=>TAG[f]?`<span class="tag ${TAG[f][0]}">${TAG[f][1]}</span>`:'').join('')}</td>
       <td class="sku">${r.skuRaw??r.model??'—'}${r.oferta!=null?`<br><span class="hint">oferta: ${fmt(r.oferta)}</span>`:''}</td>
+      <td class="hint">${r.marca??'—'}</td>
       <td class="title-cell"><a href="${r.link}" target="_blank">${r.title}</a></td>
       <td class="num">${fmt(r.myPrice)}${r.priceList!=null&&r.priceList>r.myPrice?`<br><span class="hint" style="text-decoration:line-through">${fmt(r.priceList)}</span>`:''}</td>
       <td class="num">${fmt(r.pvp)}</td>
