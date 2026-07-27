@@ -199,12 +199,14 @@ async function main() {
       const skuRaw = b.seller_custom_field ||
         b.attributes?.find((a) => a.id === 'SELLER_SKU')?.value_name || null;
       const model = b.attributes?.find((a) => a.id === 'MODEL')?.value_name || null;
+      const brand = b.attributes?.find((a) => a.id === 'BRAND')?.value_name || null;
       items.push({
         itemId: b.id,
         title: b.title,
         myPrice: b.price,
         skuRaw,
         model,
+        brand,
         sku: normSku(skuRaw) || normSku(model),
         catalog: b.catalog_product_id || null,
         link: b.permalink || itemLink(b.id),
@@ -332,8 +334,13 @@ async function main() {
       const entry = catCache.get(cid);
       const others = entry.results.filter((c) => c.seller_id !== SELLER_ID && c.item_id !== it.itemId);
       row.totalSellers = entry.total;
-      row.cheaperCount = others.filter((c) => c.price < it.myPrice).length;
-      row.winning = row.cheaperCount === 0;
+      const cheaper = others.filter((c) => c.price < it.myPrice).sort((a, b) => a.price - b.price);
+      row.cheaperCount = cheaper.length;
+      row.winning = cheaper.length === 0;
+      // Top 10 más baratos que nosotros (para el export a Excel)
+      row.cheapers = cheaper.slice(0, 10).map((c) => ({
+        price: c.price, sellerId: c.seller_id, link: itemLink(c.item_id),
+      }));
       if (others.length) {
         const best = others.reduce((a, b) => (a.price <= b.price ? a : b));
         row.bestPrice = best.price;
@@ -345,14 +352,20 @@ async function main() {
   }
 
   // 5. Nicknames solo de los "mejores" vendedores (con cache)
-  const bestIds = [...new Set(rows.filter((r) => r.bestSellerId).map((r) => r.bestSellerId))];
+  const bestIds = [...new Set([
+    ...rows.filter((r) => r.bestSellerId).map((r) => r.bestSellerId),
+    ...rows.flatMap((r) => (r.cheapers ?? []).map((c) => c.sellerId)),
+  ])];
   console.log(`[monitor] resolviendo ${bestIds.length} nicknames`);
   const nq = [...bestIds];
   async function nickWorker() {
     while (nq.length) { await getNick(nq.shift()); await sleep(SLEEP_MS); }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, nickWorker));
-  for (const r of rows) if (r.bestSellerId) r.bestSeller = nickCache.get(r.bestSellerId);
+  for (const r of rows) {
+    if (r.bestSellerId) r.bestSeller = nickCache.get(r.bestSellerId);
+    for (const c of r.cheapers ?? []) c.seller = nickCache.get(c.sellerId) ?? String(c.sellerId);
+  }
 
   // 6. Guardar
   const out = {
