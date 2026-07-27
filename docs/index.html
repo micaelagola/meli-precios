@@ -64,9 +64,9 @@
     <div style="margin-top:6px"><button id="clearPvp">Borrar listas</button></div>
   </div>
   <div class="panel">
-    <h3>2 · Ofertas (Excel semanal "SCD OFERTAS")</h3>
+    <h3>2 · Ofertas del mes (Excel "SCD OFERTAS")</h3>
     <input type="file" id="ofx" accept=".xlsx,.xls">
-    <div class="hint" id="ofxInfo">Subí la planilla semanal una vez: cada día se activa sola la hoja de la semana vigente + "TODO EL MES".</div>
+    <div class="hint" id="ofxInfo">Se lee la solapa "TODO EL MES" (ID de publicación + Precio Final). Subila una vez al mes.</div>
     <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Carga manual (opcional)</summary>
       <textarea id="ofertas" placeholder="Una por línea: SKU precio&#10;INCUT100-9  2990000"></textarea>
       <div style="margin-top:4px;display:flex;gap:8px;align-items:center">
@@ -102,7 +102,7 @@
 </table>
 <div id="empty" style="display:none">Sin resultados para este filtro.</div>
 <div class="foot">Todos los precios son los REALES que paga el consumidor (con promo aplicada); si tu publicación tiene promo se muestra el precio lleno tachado.<br>
-🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: el mejor precio del mercado está debajo del PVP del artículo · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie (ni vos ni la competencia) está vendiendo debajo del PVP → podés bajar el precio, ganar el Buy Box y seguir arriba del piso permitido · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: tus ofertas activas hoy</div>
+🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: el mejor precio del mercado está debajo del PVP del artículo · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie (ni vos ni la competencia) está vendiendo debajo del PVP → podés bajar el precio, ganar el Buy Box y seguir arriba del piso permitido · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: productos con oferta del mes cargada</div>
 
 <script>
 'use strict';
@@ -115,33 +115,8 @@ let PVP = JSON.parse(localStorage.getItem('pvp')||'{}');
 let PVPMETA = JSON.parse(localStorage.getItem('pvpMeta')||'null');
 let PVPFILES = JSON.parse(localStorage.getItem('pvpFiles')||'{}');
 let OFERTAS = JSON.parse(localStorage.getItem('ofertas')||'{}');
-let OFSHEETS = JSON.parse(localStorage.getItem('ofertasSheets')||'null'); // {hoja:{MLA:precio}}
 let OFMETA = JSON.parse(localStorage.getItem('ofertasMeta')||'null');
-let OFMLA = {};   // mapa activo MLA->precio segun el dia de hoy
-
-function activarOfertasDeHoy(){
-  OFMLA = {};
-  if(!OFSHEETS) return [];
-  const day = new Date().getDate();
-  const usadas = [];
-  const nombres = Object.keys(OFSHEETS);
-  for(const name of nombres){
-    const map = OFSHEETS[name];
-    const up = name.toUpperCase();
-    // La primera hoja (o la que diga "TODO EL MES") vale siempre.
-    let use = up.includes('TODO EL MES') || name === nombres[0];
-    // Hojas semanales: "SEMANA DEL 6 AL 12", "SEMANA DE 27 AL 2", "SEMANA 20 AL 26"...
-    const m = up.match(/SEMANA\s*(?:DEL?)?\s*(\d{1,2})\s*AL?\s*(\d{1,2})/);
-    if(m && !up.includes('TODO EL MES')){
-      const a=+m[1], b=+m[2];
-      use = a<=b ? (day>=a && day<=b) : (day>=a || day<=b);  // semana que cruza de mes
-    }
-    if(!use) continue;
-    Object.assign(OFMLA, map);
-    usadas.push(name+' ('+Object.keys(map).length+')');
-  }
-  return usadas;
-}
+let OFMLA = JSON.parse(localStorage.getItem('ofertasMLA')||'{}');  // {MLA: {p:precioFinal, d:descripcion}}
 
 $('ofx').addEventListener('change', (ev)=>{
   const f = ev.target.files[0]; if(!f) return;
@@ -149,35 +124,36 @@ $('ofx').addEventListener('change', (ev)=>{
   rd.onload = (e)=>{
     try{
       const wb = XLSX.read(e.target.result,{type:'array'});
-      const sheets = {};
-      for(const name of wb.SheetNames){
-        if(/ERROR/i.test(name)) continue;               // hoja de errores de MELI: ignorar
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
-        let hi=-1, mi=-1, pi=-1;
-        for(let i=0;i<Math.min(rows.length,8);i++){
-          const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
-          const mm=cells.findIndex(x=>x==='MLA'||x.includes('ID DE PUBLICACION')||x.includes('ID PUBLICACION'));
-          if(mm<0) continue;
-          // Precio a comparar = PRECIO FINAL (lo que termina pagando el cliente).
-          // Fallback: PVP OFERTA. Nunca PVP LLENO.
-          let pp=cells.findIndex(x=>x==='PRECIO FINAL');
-          if(pp<0) pp=cells.findIndex(x=>x==='PVP OFERTA');
-          if(pp<0) pp=cells.findIndex(x=>x.includes('PRECIO FINAL'));
-          if(pp>=0){hi=i;mi=mm;pi=pp;break;}
-        }
-        if(hi<0) continue;
-        const map={};
-        for(let i=hi+1;i<rows.length;i++){
-          const mla=String(rows[i]?.[mi]??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-          let price=rows[i]?.[pi];
-          if(typeof price==='string') price = +price.replace(/[^\d.,]/g,'').replace(/\./g,'').replace(',','.');
-          if(/^MLA\d{6,}$/.test(mla) && typeof price==='number' && isFinite(price) && price>0) map[mla]=price;
-        }
-        if(Object.keys(map).length) sheets[name]=map;
+      // Solo la solapa "TODO EL MES": ya incluye todas las ofertas del mes.
+      // Las solapas semanales solo indican qué días corre cada una.
+      const hoja = wb.SheetNames.find(n=>n.toUpperCase().includes('TODO EL MES'))
+                ?? wb.SheetNames.find(n=>!/ERROR/i.test(n));
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[hoja],{header:1});
+      let hi=-1, di=-1, mi=-1, pi=-1;
+      for(let i=0;i<Math.min(rows.length,8);i++){
+        const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
+        const mm=cells.findIndex(x=>x==='MLA'||x.includes('ID DE PUBLICACION')||x.includes('ID PUBLICACION'));
+        if(mm<0) continue;
+        // Precio a comparar = PRECIO FINAL (lo que paga el cliente). Nunca PVP LLENO.
+        let pp=cells.findIndex(x=>x==='PRECIO FINAL');
+        if(pp<0) pp=cells.findIndex(x=>x==='PVP OFERTA');
+        if(pp<0) pp=cells.findIndex(x=>x.includes('PRECIO FINAL'));
+        if(pp>=0){ hi=i; mi=mm; pi=pp; di=cells.findIndex(x=>x.includes('DESCRIPCION')||x.includes('DESCRIPCIÓN')); break; }
       }
-      if(!Object.keys(sheets).length) throw new Error('No encontré hojas con columnas MLA / Precio Final');
-      OFSHEETS=sheets; OFMETA={file:f.name,date:new Date().toISOString()};
-      localStorage.setItem('ofertasSheets',JSON.stringify(sheets));
+      if(hi<0) throw new Error(`la solapa "${hoja}" no tiene columnas MLA / Precio Final`);
+      const map={};
+      for(let i=hi+1;i<rows.length;i++){
+        const mla=String(rows[i]?.[mi]??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+        let price=rows[i]?.[pi];
+        if(typeof price==='string') price = +price.replace(/[^\d.,]/g,'').replace(/\./g,'').replace(',','.');
+        if(/^MLA\d{6,}$/.test(mla) && typeof price==='number' && isFinite(price) && price>0){
+          map[mla] = { p: price, d: di>=0 ? String(rows[i]?.[di]??'') : '' };
+        }
+      }
+      if(!Object.keys(map).length) throw new Error('no encontré filas con MLA + precio');
+      OFMLA = map;
+      OFMETA = {file:f.name, hoja, date:new Date().toISOString(), count:Object.keys(map).length};
+      localStorage.setItem('ofertasMLA',JSON.stringify(map));
       localStorage.setItem('ofertasMeta',JSON.stringify(OFMETA));
       build();
     }catch(err){ $('ofxInfo').textContent='Error leyendo Excel: '+err.message; }
@@ -282,8 +258,11 @@ function build(){
   if(!DATA) return;
   $('meta').textContent=`Última corrida: ${new Date(DATA.generatedAt).toLocaleString('es-AR')} · ${DATA.totalItems} publicaciones (${DATA.withCatalog} con catálogo, ${DATA.withAprox??0} por similitud)`;
   showPvpInfo(); showOfInfo();
-  const hojas = activarOfertasDeHoy();
-  if(OFMETA) $('ofxInfo').textContent = `✓ ${OFMETA.file} — hoy activas: ${hojas.join(' + ')||'ninguna hoja coincide con la fecha'} → ${Object.keys(OFMLA).length} ofertas`;
+  if(OFMETA){
+    const enMeli = DATA.rows.filter(r=>OFMLA[r.itemId]).length;
+    $('ofxInfo').textContent = `✓ ${OFMETA.file} — solapa "${OFMETA.hoja}": ${Object.keys(OFMLA).length} ofertas` +
+      ` (${enMeli} cruzadas con tus publicaciones activas)`;
+  }
   const comboPvp=(cand)=>{
     if(!cand) return null;
     const parts=String(cand).split(/\s*(?:á|\+)\s*/i).map(norm).filter(Boolean);
@@ -295,7 +274,7 @@ function build(){
   ROWS = DATA.rows.map(r=>{
     const sku = r.sku;
     let pvp = (sku ? PVP[sku] : null) ?? PVP[norm(r.model)] ?? comboPvp(r.skuRaw) ?? comboPvp(r.model) ?? null;
-    const oferta = OFMLA[r.itemId] ?? (sku ? OFERTAS[sku] : null) ?? OFERTAS[norm(r.model)] ?? null;
+    const oferta = OFMLA[r.itemId]?.p ?? (sku ? OFERTAS[sku] : null) ?? OFERTAS[norm(r.model)] ?? null;
     const flags=[];
     if(oferta!=null) flags.push('HOY');
     if(r.matchType==='aprox') flags.push('APROX');
@@ -348,7 +327,7 @@ function renderStats(){
   const c=(f)=>B.filter(r=>r.flags.includes(f)).length;
   const defs=[
     ['all','Todas',B.length],
-    ['HOY','⭐ Ofertas hoy',c('HOY')],
+    ['HOY','⭐ Con oferta',c('HOY')],
     ['PISADO','🔴 Me pisan',c('PISADO')],
     ['PVP','🟠 Pisan PVP',c('PVP')],
     ['OPP','🔵 Oportunidad',c('OPP')],
@@ -369,7 +348,7 @@ $('hdr').addEventListener('click',(e)=>{
 });
 
 const TAG={PISADO:['t-pisado','🔴 PISADO'],PVP:['t-pvp','🟠 PISAN PVP'],GANA:['t-gana','🟢 GANANDO'],
-  OPP:['t-opp','🔵 OPORTUNIDAD'],HOY:['t-hoy','⭐ HOY'],PISAOFERTA:['t-pisado','⚠️ PISAN TU OFERTA'],
+  OPP:['t-opp','🔵 OPORTUNIDAD'],HOY:['t-hoy','⭐ OFERTA'],PISAOFERTA:['t-pisado','⚠️ PISAN TU OFERTA'],
   APROX:['t-sincat','≈ similar'],SINCAT:['t-sincat','sin datos']};
 
 // Descarga: SKU, PVP, mi precio, y UNA FILA POR CADA competidor más barato.
@@ -386,7 +365,7 @@ $('exportBtn').addEventListener('click', ()=>{
       'Mi link': r.link,
       'Mi precio': r.myPrice,
       'Precio lleno': r.priceList ?? '',
-      'Oferta hoy': r.oferta ?? '',
+      'Precio oferta': r.oferta ?? '',
       PVP: r.pvp ?? '',
       Estado: r.flags.map(f=>TAG[f]?TAG[f][1].replace(/^\S+\s/,''):'').filter(Boolean).join(' / '),
       'Total vendedores': r.totalSellers ?? '',
