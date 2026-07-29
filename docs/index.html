@@ -102,6 +102,437 @@
 </table>
 <div id="empty" style="display:none">Sin resultados para este filtro.</div>
 <div class="foot">Todos los precios son los REALES que paga el consumidor (con promo aplicada); si tu publicación tiene promo se muestra el precio lleno tachado.<br>
+🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: alguien vende a MÁS de 5% debajo del PVP (hasta 5% de descuento está admitido) · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie (ni vos ni la competencia) usa el 5% de descuento permitido → podés tomarlo vos, ganar el Buy Box y seguir dentro de lo admitido · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: productos con oferta del mes cargada</div>
+
+<script>
+'use strict';
+const $ = (id)=>document.getElementById(id);
+const fmt = (n)=> n==null ? '—' : '$'+Math.round(n).toLocaleString('es-AR');
+const norm = (s)=> s ? String(s).toUpperCase().replace(/[^A-Z0-9]/g,'') : null;
+
+let DATA=null, ROWS=[], FILTER='all', SORTK='flagRank', SORTD=1, Q='';
+// Descuento tolerado sobre el PVP: hasta 5% admitido. Infracción = MÁS de 5% abajo.
+const TOL = 0.05;
+const EPS = 0.0005;
+const descPvp = (precio, pvp) => (pvp && precio!=null) ? (pvp - precio)/pvp - EPS : null;
+const pctPvp  = (precio, pvp) => (pvp && precio!=null) ? Math.round(((pvp - precio)/pvp)*1000)/10 : null;
+let PVP = JSON.parse(localStorage.getItem('pvp')||'{}');
+let PVPMETA = JSON.parse(localStorage.getItem('pvpMeta')||'null');
+let PVPFILES = JSON.parse(localStorage.getItem('pvpFiles')||'{}');
+let OFERTAS = JSON.parse(localStorage.getItem('ofertas')||'{}');
+let OFMETA = JSON.parse(localStorage.getItem('ofertasMeta')||'null');
+let OFMLA = JSON.parse(localStorage.getItem('ofertasMLA')||'{}');  // {MLA: {p:precioFinal, d:descripcion}}
+
+$('ofx').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = (e)=>{
+    try{
+      const wb = XLSX.read(e.target.result,{type:'array'});
+      // Solo la solapa "TODO EL MES": ya incluye todas las ofertas del mes.
+      // Las solapas semanales solo indican qué días corre cada una.
+      const hoja = wb.SheetNames.find(n=>n.toUpperCase().includes('TODO EL MES'))
+                ?? wb.SheetNames.find(n=>!/ERROR/i.test(n));
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[hoja],{header:1});
+      let hi=-1, di=-1, mi=-1, pi=-1;
+      for(let i=0;i<Math.min(rows.length,8);i++){
+        const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
+        const mm=cells.findIndex(x=>x==='MLA'||x.includes('ID DE PUBLICACION')||x.includes('ID PUBLICACION'));
+        if(mm<0) continue;
+        // Precio a comparar = PRECIO FINAL (lo que paga el cliente). Nunca PVP LLENO.
+        let pp=cells.findIndex(x=>x==='PRECIO FINAL');
+        if(pp<0) pp=cells.findIndex(x=>x==='PVP OFERTA');
+        if(pp<0) pp=cells.findIndex(x=>x.includes('PRECIO FINAL'));
+        if(pp>=0){ hi=i; mi=mm; pi=pp; di=cells.findIndex(x=>x.includes('DESCRIPCION')||x.includes('DESCRIPCIÓN')); break; }
+      }
+      if(hi<0) throw new Error(`la solapa "${hoja}" no tiene columnas MLA / Precio Final`);
+      const map={};
+      for(let i=hi+1;i<rows.length;i++){
+        const mla=String(rows[i]?.[mi]??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+        let price=rows[i]?.[pi];
+        if(typeof price==='string') price = +price.replace(/[^\d.,]/g,'').replace(/\./g,'').replace(',','.');
+        if(/^MLA\d{6,}$/.test(mla) && typeof price==='number' && isFinite(price) && price>0){
+          map[mla] = { p: price, d: di>=0 ? String(rows[i]?.[di]??'') : '' };
+        }
+      }
+      if(!Object.keys(map).length) throw new Error('no encontré filas con MLA + precio');
+      OFMLA = map;
+      OFMETA = {file:f.name, hoja, date:new Date().toISOString(), count:Object.keys(map).length};
+      localStorage.setItem('ofertasMLA',JSON.stringify(map));
+      localStorage.setItem('ofertasMeta',JSON.stringify(OFMETA));
+      build();
+    }catch(err){ $('ofxInfo').textContent='Error leyendo Excel: '+err.message; }
+  };
+  rd.readAsArrayBuffer(f);
+});
+
+fetch('data.json?'+Date.now()).then(r=>r.json()).then(d=>{ DATA=d; build(); }).catch(()=>{
+  $('meta').textContent='No se encontró data.json — corré el job o esperá la corrida diaria.';
+});
+
+$('xls').addEventListener('change', (ev)=>{
+  const files = [...ev.target.files]; if(!files.length) return;
+  let pend = files.length;
+  const resumen = [];
+  for(const f of files){
+    const rd = new FileReader();
+    rd.onload = (e)=>{
+      try{
+        const wb = XLSX.read(e.target.result,{type:'array'});
+        const map = parsePvpWorkbook(wb);
+        const n = Object.keys(map).length;
+        if(!n) throw new Error('sin columnas de código/PVP reconocidas');
+        Object.assign(PVP, map);
+        PVPFILES[f.name] = n;
+        resumen.push(`${f.name}: ${n}`);
+      }catch(err){ resumen.push(`${f.name}: ERROR (${err.message})`); }
+      if(--pend===0){
+        PVPMETA={date:new Date().toISOString(),count:Object.keys(PVP).length};
+        localStorage.setItem('pvp',JSON.stringify(PVP));
+        localStorage.setItem('pvpFiles',JSON.stringify(PVPFILES));
+        localStorage.setItem('pvpMeta',JSON.stringify(PVPMETA));
+        build();
+      }
+    };
+    rd.readAsArrayBuffer(f);
+  }
+});
+
+// Detecta el formato de cada hoja y devuelve {skuNormalizado: pvp}
+// Soporta: lista Lusqtoff (CODIGO / PVP On line) y lista BTA (Codigo / P.S.V. Meli).
+function parsePvpWorkbook(wb){
+  const map={};
+  for(const name of wb.SheetNames){
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
+    let hi=-1, ci=-1, pi=-1;
+    for(let i=0;i<Math.min(rows.length,12);i++){
+      const cells=Array.from(rows[i]||[], c=>String(c??'').toUpperCase().replace(/\s+/g,' ').trim());
+      const c=cells.findIndex(x=>x==='CODIGO'||x==='CÓDIGO');
+      if(c<0) continue;
+      // 1) Lusqtoff: "PVP On line" (sin cuotas)
+      let p=cells.findIndex(x=>x.includes('PVP ON LINE') && !x.includes('CUOTAS'));
+      // 2) BTA: "P.S.V. Meli" (precio sugerido de venta en Meli)
+      if(p<0) p=cells.findIndex(x=>x.replace(/\./g,'').includes('PSV MELI'));
+      if(p>=0){hi=i;ci=c;pi=p;break;}
+    }
+    if(hi<0) continue;
+    for(let i=hi+1;i<rows.length;i++){
+      const sku=norm(rows[i]?.[ci]); const pvp=rows[i]?.[pi];
+      if(sku && typeof pvp==='number' && pvp>0) map[sku]=pvp;
+    }
+  }
+  return map;
+}
+
+$('clearPvp').addEventListener('click', ()=>{
+  PVP={}; PVPFILES={}; PVPMETA=null;
+  localStorage.removeItem('pvp'); localStorage.removeItem('pvpFiles'); localStorage.removeItem('pvpMeta');
+  build();
+});
+
+function showPvpInfo(){
+  const files = Object.entries(PVPFILES);
+  if(!files.length) return;
+  $('pvpInfo').innerHTML = `✓ ${Object.keys(PVP).length} PVP cargados — ` +
+    files.map(([f,n])=>`${f} (${n})`).join(' · ');
+}
+
+$('saveOf').addEventListener('click', ()=>{
+  const map={};
+  for(const line of $('ofertas').value.split('\n')){
+    const m=line.trim().match(/^(\S+)[\s;,\t]+\$?\s*([\d.,]+)/);
+    if(!m) continue;
+    const sku=norm(m[1]);
+    let p=m[2].replace(/\./g,'').replace(',','.');
+    if(sku && !isNaN(+p)) map[sku]=+p;
+  }
+  OFERTAS=map;
+  localStorage.setItem('ofertas',JSON.stringify(map));
+  localStorage.setItem('ofertasDate',new Date().toDateString());
+  showOfInfo(); build();
+});
+function showOfInfo(){
+  const n=Object.keys(OFERTAS).length;
+  $('ofInfo').textContent = n? `✓ ${n} ofertas cargadas`:'';
+}
+if(localStorage.getItem('ofertasDate')===new Date().toDateString()){
+  $('ofertas').value=Object.entries(OFERTAS).map(([k,v])=>k+'  '+v).join('\n');
+}else{ OFERTAS={}; }
+
+function build(){
+  if(!DATA) return;
+  $('meta').textContent=`Última corrida: ${new Date(DATA.generatedAt).toLocaleString('es-AR')} · ${DATA.totalItems} publicaciones (${DATA.withCatalog} con catálogo, ${DATA.withAprox??0} por similitud)`;
+  showPvpInfo(); showOfInfo();
+  if(OFMETA){
+    const enMeli = DATA.rows.filter(r=>OFMLA[r.itemId]).length;
+    $('ofxInfo').textContent = `✓ ${OFMETA.file} — solapa "${OFMETA.hoja}": ${Object.keys(OFMLA).length} ofertas` +
+      ` (${enMeli} cruzadas con tus publicaciones activas)`;
+  }
+  const comboPvp=(cand)=>{
+    if(!cand) return null;
+    const parts=String(cand).split(/\s*(?:á|\+)\s*/i).map(norm).filter(Boolean);
+    if(parts.length<2) return null;
+    let sum=0;
+    for(const p of parts){ if(PVP[p]==null) return null; sum+=PVP[p]; }
+    return sum;
+  };
+  ROWS = DATA.rows.map(r=>{
+    const sku = r.sku;
+    let pvp = (sku ? PVP[sku] : null) ?? PVP[norm(r.model)] ?? comboPvp(r.skuRaw) ?? comboPvp(r.model) ?? null;
+    const oferta = OFMLA[r.itemId]?.p ?? (sku ? OFERTAS[sku] : null) ?? OFERTAS[norm(r.model)] ?? null;
+    const flags=[];
+    if(oferta!=null) flags.push('HOY');
+    if(r.matchType==='aprox') flags.push('APROX');
+    if(r.matchType==null) flags.push('SINCAT');
+    else{
+      if(r.cheaperCount>0) flags.push('PISADO');
+      if(r.winning) flags.push('GANA');
+      if(pvp!=null && r.bestPrice!=null && descPvp(r.bestPrice,pvp) > TOL) flags.push('PVP');
+      if(pvp!=null && r.bestPrice!=null && descPvp(r.bestPrice,pvp) <= TOL && descPvp(r.myPrice,pvp) <= TOL) flags.push('OPP');
+      if(oferta!=null && r.bestPrice!=null && r.bestPrice < oferta) flags.push('PISAOFERTA');
+    }
+    let rank=9;
+    if(flags.includes('PISAOFERTA')) rank=0;
+    else if(flags.includes('HOY')) rank=1;
+    else if(flags.includes('PISADO')) rank=2;
+    else if(flags.includes('PVP')) rank=3;
+    else if(flags.includes('OPP')) rank=4;
+    else if(flags.includes('GANA')) rank=6;
+    if(flags.includes('SINCAT')) rank=Math.max(rank,8);
+    return {...r, pvp, oferta, marca:marcaDe(r), pctBajoPvp:pctPvp(r.bestPrice,pvp), flags, flagRank:rank};
+  });
+  renderBrands(); renderStats(); render();
+}
+
+function marcaDe(r){
+  if(r.brand && String(r.brand).trim()) return String(r.brand).trim().toUpperCase();
+  const t=(r.title||'').toUpperCase();
+  if(/LUSQTOFF|LÜSQTOFF/.test(t)) return 'LUSQTOFF';
+  if(/DOWEN|PAGIO/.test(t)) return 'DOWEN PAGIO';
+  if(/\bBTA\b/.test(t)) return 'BTA';
+  if(/WESTUL/.test(t)) return 'WESTUL';
+  return 'SIN MARCA';
+}
+
+function renderBrands(){
+  const cur=$('brand').value;
+  const marcas=[...new Set(ROWS.map(r=>r.marca))].sort();
+  $('brand').innerHTML='<option value="">Todas las marcas</option>'+
+    marcas.map(m=>`<option value="${m}">${m} (${ROWS.filter(r=>r.marca===m).length})</option>`).join('');
+  if(marcas.includes(cur)) $('brand').value=cur;
+}
+
+function baseRows(){
+  const b=$('brand').value;
+  return b ? ROWS.filter(r=>r.marca===b) : ROWS;
+}
+
+function renderStats(){
+  const B=baseRows();
+  const c=(f)=>B.filter(r=>r.flags.includes(f)).length;
+  const defs=[
+    ['all','Todas',B.length],
+    ['HOY','⭐ Con oferta',c('HOY')],
+    ['PISADO','🔴 Me pisan',c('PISADO')],
+    ['PVP','🟠 Pisan PVP (>5%)',c('PVP')],
+    ['OPP','🔵 Oportunidad',c('OPP')],
+    ['GANA','🟢 Ganando',c('GANA')],
+    ['SINCAT','Sin catálogo',c('SINCAT')],
+  ];
+  $('stats').innerHTML=defs.map(([k,l,n])=>`<div class="stat ${FILTER===k?'on':''}" data-f="${k}"><b>${n}</b><span>${l}</span></div>`).join('');
+  document.querySelectorAll('.stat').forEach(el=>el.onclick=()=>{FILTER=el.dataset.f;renderStats();render();});
+}
+
+$('q').addEventListener('input',(e)=>{Q=e.target.value.toUpperCase();render();});
+$('brand').addEventListener('change',()=>{renderStats();render();});
+$('hdr').addEventListener('click',(e)=>{
+  const k=e.target.closest('th')?.dataset.k; if(!k) return;
+  const kk = k==='flag'?'flagRank':k;
+  if(SORTK===kk) SORTD*=-1; else {SORTK=kk;SORTD=1;}
+  render();
+});
+
+const TAG={PISADO:['t-pisado','🔴 PISADO'],PVP:['t-pvp','🟠 PISAN PVP'],GANA:['t-gana','🟢 GANANDO'],
+  OPP:['t-opp','🔵 OPORTUNIDAD'],HOY:['t-hoy','⭐ OFERTA'],PISAOFERTA:['t-pisado','⚠️ PISAN TU OFERTA'],
+  APROX:['t-sincat','≈ similar'],SINCAT:['t-sincat','sin datos']};
+
+// Descarga: SKU, PVP, mi precio, y UNA FILA POR CADA competidor más barato.
+$('exportBtn').addEventListener('click', ()=>{
+  let rows=baseRows();
+  if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
+  if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
+  const out=[];
+  for(const r of rows){
+    const base={
+      SKU: r.skuRaw ?? r.model ?? '',
+      Marca: r.marca ?? '',
+      Publicacion: r.title,
+      'Mi link': r.link,
+      'Mi precio': r.myPrice,
+      'Precio lleno': r.priceList ?? '',
+      'Precio oferta': r.oferta ?? '',
+      PVP: r.pvp ?? '',
+      '% debajo del PVP': r.pctBajoPvp ?? '',
+      Estado: r.flags.map(f=>TAG[f]?TAG[f][1].replace(/^\S+\s/,''):'').filter(Boolean).join(' / '),
+      'Total vendedores': r.totalSellers ?? '',
+      'Me pisan': r.cheaperCount ?? '',
+    };
+    const comps = r.cheapers ?? [];
+    if(!comps.length){
+      out.push({...base, 'Competidor': '', 'Precio competidor': '', 'Dif vs mi precio': '', 'Link competidor': ''});
+    }else{
+      comps.forEach((c,i)=>out.push({...base,
+        'Competidor': c.seller ?? c.sellerId,
+        'Precio competidor': c.price,
+        'Dif vs mi precio': Math.round((r.myPrice - c.price)*100)/100,
+        'Link competidor': c.link,
+      }));
+    }
+  }
+  const ws = XLSX.utils.json_to_sheet(out);
+  ws['!cols'] = [{wch:18},{wch:14},{wch:46},{wch:38},{wch:12},{wch:12},{wch:12},{wch:12},{wch:15},{wch:26},{wch:10},{wch:9},{wch:22},{wch:14},{wch:14},{wch:38}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Competencia');
+  const hoy = new Date().toISOString().slice(0,10);
+  const marca = ($('brand').value||'todas').replace(/[^A-Za-z0-9]+/g,'-').toLowerCase();
+  XLSX.writeFile(wb, `competencia_${marca}_${FILTER.toLowerCase()}_${hoy}.xlsx`);
+});
+
+function render(){
+  let rows=baseRows();
+  if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
+  if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
+  rows=[...rows].sort((a,b)=>{
+    let va=a[SORTK],vb=b[SORTK];
+    if(va==null) return 1; if(vb==null) return -1;
+    if(typeof va==='string') return SORTD*va.localeCompare(vb);
+    return SORTD*(va-vb);
+  });
+  $('count').textContent=rows.length+' filas';
+  $('empty').style.display=rows.length?'none':'block';
+  $('tb').innerHTML=rows.map(r=>{
+    const diff = r.bestPrice!=null? r.myPrice-r.bestPrice : null;
+    return `<tr class="${r.flags.includes('HOY')?'hoy':''}">
+      <td>${r.flags.map(f=>TAG[f]?`<span class="tag ${TAG[f][0]}">${TAG[f][1]}</span>`:'').join('')}</td>
+      <td class="sku">${r.skuRaw??r.model??'—'}${r.oferta!=null?`<br><span class="hint">oferta: ${fmt(r.oferta)}</span>`:''}</td>
+      <td class="hint">${r.marca??'—'}</td>
+      <td class="title-cell"><a href="${r.link}" target="_blank">${r.title}</a></td>
+      <td class="num">${fmt(r.myPrice)}${r.priceList!=null&&r.priceList>r.myPrice?`<br><span class="hint" style="text-decoration:line-through">${fmt(r.priceList)}</span>`:''}</td>
+      <td class="num">${fmt(r.pvp)}</td>
+      <td class="num">${fmt(r.bestPrice)}${diff!=null&&diff>0?`<br><span class="diff-neg">${fmt(diff)} abajo tuyo</span>`:''}${r.pctBajoPvp!=null?`<br><span class="hint">${r.pctBajoPvp>=0?'-':'+'}${Math.abs(r.pctBajoPvp)}% vs PVP</span>`:''}</td>
+      <td>${r.bestSeller?`<a href="${r.bestLink}" target="_blank">${r.bestSeller}</a>`:'—'}</td>
+      <td class="num">${r.cheaperCount??'—'}</td>
+      <td class="num">${r.totalSellers??'—'}</td>
+    </tr>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MELI Precios — Monitor de Competencia</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--txt:#1a1d21;--mut:#6b7280;--line:#e5e7eb;
+    --red:#dc2626;--red-bg:#fef2f2;--org:#d97706;--org-bg:#fffbeb;
+    --grn:#16a34a;--grn-bg:#f0fdf4;--blu:#2563eb;--blu-bg:#eff6ff;--yel-bg:#fef9c3}
+  *{box-sizing:border-box;margin:0}
+  body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);padding:16px}
+  h1{font-size:20px;margin-bottom:2px}
+  .sub{color:var(--mut);font-size:12px;margin-bottom:14px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+  .row-flex{display:flex;gap:12px;flex-wrap:wrap}
+  .row-flex>.panel{flex:1;min-width:280px}
+  .panel h3{font-size:13px;margin-bottom:6px}
+  .hint{font-size:11.5px;color:var(--mut)}
+  input[type=file],textarea{width:100%;font:inherit}
+  textarea{border:1px solid var(--line);border-radius:6px;padding:6px;height:64px;resize:vertical}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 12px;cursor:pointer}
+  button:hover{background:var(--bg)}
+  .stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;text-align:center}
+  .stat b{display:block;font-size:20px}
+  .stat span{font-size:11px;color:var(--mut)}
+  .stat.on{outline:2px solid var(--txt)}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  #q{border:1px solid var(--line);border-radius:8px;padding:6px 10px;width:260px;font:inherit}
+  #brand{border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit;background:var(--card)}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut);text-align:left;padding:8px;border-bottom:2px solid var(--line);background:#fafafa;cursor:pointer;white-space:nowrap}
+  td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:hover td{background:#fafbfc}
+  tr.hoy td{background:var(--yel-bg)}
+  .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tag{display:inline-block;font-size:10.5px;font-weight:600;border-radius:5px;padding:1px 7px;margin:1px 2px 1px 0;white-space:nowrap}
+  .t-pisado{background:var(--red-bg);color:var(--red)}
+  .t-pvp{background:var(--org-bg);color:var(--org)}
+  .t-gana{background:var(--grn-bg);color:var(--grn)}
+  .t-opp{background:var(--blu-bg);color:var(--blu)}
+  .t-hoy{background:var(--yel-bg);color:#a16207}
+  .t-sincat{background:#f3f4f6;color:var(--mut)}
+  a{color:var(--blu);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .title-cell{max-width:340px}
+  .sku{font-family:ui-monospace,monospace;font-size:12px}
+  .diff-neg{color:var(--red);font-weight:600}
+  #empty{padding:30px;text-align:center;color:var(--mut)}
+  .foot{margin-top:10px;font-size:11px;color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>MELI Precios — Monitor de Competencia</h1>
+<div class="sub" id="meta">Cargando datos…</div>
+
+<div class="row-flex">
+  <div class="panel">
+    <h3>1 · Listas de PVP (Excel, uno por proveedor)</h3>
+    <input type="file" id="xls" accept=".xlsx,.xls" multiple>
+    <div class="hint" id="pvpInfo">Podés subir varias (Lusqtoff, BTA, …). Se acumulan y quedan guardadas en este navegador.</div>
+    <div style="margin-top:6px"><button id="clearPvp">Borrar listas</button></div>
+  </div>
+  <div class="panel">
+    <h3>2 · Ofertas del mes (Excel "SCD OFERTAS")</h3>
+    <input type="file" id="ofx" accept=".xlsx,.xls">
+    <div class="hint" id="ofxInfo">Se lee la solapa "TODO EL MES" (ID de publicación + Precio Final). Subila una vez al mes.</div>
+    <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Carga manual (opcional)</summary>
+      <textarea id="ofertas" placeholder="Una por línea: SKU precio&#10;INCUT100-9  2990000"></textarea>
+      <div style="margin-top:4px;display:flex;gap:8px;align-items:center">
+        <button id="saveOf">Guardar</button><span class="hint" id="ofInfo"></span>
+      </div>
+    </details>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="toolbar">
+  <input id="q" placeholder="Buscar SKU o título…">
+  <select id="brand"><option value="">Todas las marcas</option></select>
+  <button id="exportBtn">⬇ Descargar Excel</button>
+  <span class="hint" id="count"></span>
+</div>
+
+<table>
+  <thead><tr id="hdr">
+    <th data-k="flag">Estado</th>
+    <th data-k="sku">SKU</th>
+    <th data-k="brand">Marca</th>
+    <th data-k="title">Publicación</th>
+    <th data-k="myPrice" class="num">Mi precio</th>
+    <th data-k="pvp" class="num">PVP</th>
+    <th data-k="bestPrice" class="num">Mejor precio otro</th>
+    <th data-k="bestSeller">Quién</th>
+    <th data-k="cheaperCount" class="num">Me pisan</th>
+    <th data-k="totalSellers" class="num">Vendedores</th>
+  </tr></thead>
+  <tbody id="tb"></tbody>
+</table>
+<div id="empty" style="display:none">Sin resultados para este filtro.</div>
+<div class="foot">Todos los precios son los REALES que paga el consumidor (con promo aplicada); si tu publicación tiene promo se muestra el precio lleno tachado.<br>
 🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: el mejor precio del mercado está debajo del PVP del artículo · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie (ni vos ni la competencia) está vendiendo debajo del PVP → podés bajar el precio, ganar el Buy Box y seguir arriba del piso permitido · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: productos con oferta del mes cargada</div>
 
 <script>
