@@ -173,6 +173,16 @@ async function main() {
   // 1) Credenciales propias del monitor. 2) Si no tiene, las hereda de la app SCD.
   let origen = MI_PROVIDER;
   let { creds, rotas } = await getCreds(MI_PROVIDER);
+  // Semilla desde los secrets de GitHub (independiente de la app SCD).
+  if (!creds.refresh_token && process.env.MELI_REFRESH_TOKEN && process.env.MELI_APP_ID && process.env.MELI_CLIENT_SECRET) {
+    origen = 'secrets de GitHub';
+    creds = {
+      app_id: process.env.MELI_APP_ID,
+      client_secret: process.env.MELI_CLIENT_SECRET,
+      refresh_token: process.env.MELI_REFRESH_TOKEN,
+    };
+    rotas = [];
+  }
   if (!creds.refresh_token) {
     origen = 'meli (heredadas de SCD)';
     const scd = await getCreds('meli');
