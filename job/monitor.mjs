@@ -66,30 +66,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ─── DB: credenciales compartidas ────────────────────────────────────────────
 const db = new pg.Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-async function getCreds() {
-  const r = await db.query(`SELECT key, value FROM provider_credentials WHERE provider='meli'`);
+const MI_PROVIDER = 'meli_monitor';
+
+async function getCreds(provider) {
+  const r = await db.query(`SELECT key, value FROM provider_credentials WHERE provider=$1`, [provider]);
   const c = {};
+  const rotas = [];
   for (const row of r.rows) {
-    try { c[row.key] = decrypt(row.value); } catch { c[row.key] = row.value; }
+    try { c[row.key] = decrypt(row.value); }
+    catch { rotas.push(row.key); }
   }
-  return c;
+  return { creds: c, rotas };
 }
 
-async function saveTokens(d) {
-  await db.query(
-    `UPDATE provider_credentials SET value=$1, updated_at=now() WHERE provider='meli' AND key='access_token'`,
-    [encrypt(d.access_token)]
-  );
-  if (d.refresh_token) {
+async function guardar(pares) {
+  for (const [key, valor] of Object.entries(pares)) {
+    if (valor == null) continue;
     await db.query(
-      `UPDATE provider_credentials SET value=$1, updated_at=now() WHERE provider='meli' AND key='refresh_token'`,
-      [encrypt(d.refresh_token)]
+      `INSERT INTO provider_credentials (provider, key, value, updated_at)
+       VALUES ($1,$2,$3,now())
+       ON CONFLICT (provider, key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
+      [MI_PROVIDER, key, encrypt(String(valor))]
     );
   }
 }
 
+async function saveTokens(d) {
+  await guardar({
+    access_token: d.access_token,
+    refresh_token: d.refresh_token ?? null,
+    app_id: CREDS?.app_id,
+    client_secret: CREDS?.client_secret,
+  });
+}
+
 let TOKEN = null;
 let CREDS = null;
+let ultimoRefresh = 0;   // evita bucle de refresh ante 401/403 permanente
 
 async function refreshToken() {
   const r = await fetch(`${API}/oauth/token`, {
@@ -102,7 +115,13 @@ async function refreshToken() {
       refresh_token: CREDS.refresh_token,
     }),
   });
-  if (!r.ok) throw new Error(`Refresh token falló: ${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const detalle = await r.text();
+    throw new Error(
+      `No se pudo renovar el token de MercadoLibre (${r.status}): ${detalle}\n` +
+      `-> Reconecta MercadoLibre desde la app SCD y volve a correr este job.`
+    );
+  }
   const d = await r.json();
   await saveTokens(d);              // persistir ANTES de usar (rotación de un solo uso)
   CREDS.refresh_token = d.refresh_token ?? CREDS.refresh_token;
@@ -123,7 +142,12 @@ async function apiGet(p, retries = 3) {
       if (i < retries) { await sleep(1000 * (i + 1)); continue; }
       throw new Error(`MELI red/timeout: ${p} (${e.name})`);
     }
-    if (r.status === 401) { await refreshToken(); continue; }
+    // 401 = vencido. 403 = MELI tambien lo usa para tokens invalidos (PolicyAgent).
+    if ((r.status === 401 || r.status === 403) && Date.now() - ultimoRefresh > 60000) {
+      ultimoRefresh = Date.now();
+      await refreshToken();
+      continue;
+    }
     if (r.status === 429) { await sleep(2000 * (i + 1)); if (i < retries + 2) continue; }
     if (!r.ok) {
       if (i < retries) { await sleep(800 * (i + 1)); continue; }
@@ -146,8 +170,27 @@ if (STATE_FILE && fs.existsSync(STATE_FILE)) {
 async function main() {
   const t0 = Date.now();
   await db.connect();
-  CREDS = await getCreds();
-  TOKEN = CREDS.access_token;
+  // 1) Credenciales propias del monitor. 2) Si no tiene, las hereda de la app SCD.
+  let origen = MI_PROVIDER;
+  let { creds, rotas } = await getCreds(MI_PROVIDER);
+  if (!creds.refresh_token) {
+    origen = 'meli (heredadas de SCD)';
+    const scd = await getCreds('meli');
+    creds = scd.creds; rotas = scd.rotas;
+  }
+  CREDS = creds;
+
+  if (!CREDS.refresh_token || !CREDS.app_id || !CREDS.client_secret) {
+    throw new Error(
+      'Faltan credenciales de MercadoLibre' +
+      (rotas.length ? ' (no se pudieron descifrar: ' + rotas.join(', ') + ' - guardadas con otra ENCRYPTION_KEY)' : '') +
+      '.\n-> Reconecta MercadoLibre desde la app SCD y volve a correr este job: ' +
+      'el monitor guarda su propia copia y deja de depender de eso.'
+    );
+  }
+  console.log('[monitor] credenciales: ' + origen);
+
+  TOKEN = CREDS.access_token ?? null;
   if (!TOKEN) await refreshToken();
 
   const seller = (await db.query(`SELECT value FROM app_settings WHERE key='meli_seller_id'`)).rows[0]?.value ?? '182591613';
