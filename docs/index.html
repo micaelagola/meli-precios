@@ -261,7 +261,10 @@ if(localStorage.getItem('ofertasDate')===new Date().toDateString()){
 
 function build(){
   if(!DATA) return;
-  $('meta').textContent=`Última corrida: ${new Date(DATA.generatedAt).toLocaleString('es-AR')} · ${DATA.totalItems} publicaciones (${DATA.withCatalog} con catálogo, ${DATA.withAprox??0} por similitud)`;
+  const horas = (Date.now() - new Date(DATA.generatedAt)) / 36e5;
+  const viejo = horas > 30;   // la corrida es diaria: más de 30h significa que algo falló
+  $('meta').innerHTML = `Última corrida: ${new Date(DATA.generatedAt).toLocaleString('es-AR')} · ${DATA.totalItems} publicaciones (${DATA.withCatalog} con catálogo, ${DATA.withAprox??0} por similitud)` +
+    (viejo ? ` <span style="background:#fef2f2;color:#dc2626;font-weight:600;border-radius:5px;padding:2px 8px">⚠ DATOS DESACTUALIZADOS (${Math.floor(horas/24)} días) — la actualización automática está fallando</span>` : '');
   showPvpInfo(); showOfInfo();
   if(OFMETA){
     const enMeli = DATA.rows.filter(r=>OFMLA[r.itemId]).length;
