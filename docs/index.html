@@ -102,7 +102,7 @@
 </table>
 <div id="empty" style="display:none">Sin resultados para este filtro.</div>
 <div class="foot">Todos los precios son los REALES que paga el consumidor (con promo aplicada); si tu publicación tiene promo se muestra el precio lleno tachado.<br>
-🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: alguien vende a MÁS de 5% debajo del PVP (hasta 5% de descuento está admitido) · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD: nadie (ni vos ni la competencia) usa el 5% de descuento permitido → podés tomarlo vos, ganar el Buy Box y seguir dentro de lo admitido · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: productos con oferta del mes cargada</div>
+🔴 PISADO: alguien vende más barato que vos · 🟠 PISAN PVP: alguien vende a MÁS de 5% debajo del PVP (hasta 5% de descuento está admitido) · 🟢 GANANDO: tenés el precio más bajo · 🔵 OPORTUNIDAD (solo publicaciones de catálogo, que es donde se gana por precio): nadie está usando el 5% de descuento permitido — ni vos ni la competencia — así que podés tomarlo, quedarte con el primer puesto y vender más sin infringir el PVP · ≈ similar: publicación sin catálogo comparada contra el producto de catálogo equivalente (matching por título) · sin datos: no se encontró producto comparable · ⭐ filas amarillas: productos con oferta del mes cargada</div>
 
 <script>
 'use strict';
@@ -291,7 +291,8 @@ function build(){
       if(r.cheaperCount>0) flags.push('PISADO');
       if(r.winning) flags.push('GANA');
       if(pvp!=null && r.bestPrice!=null && descPvp(r.bestPrice,pvp) > TOL) flags.push('PVP');
-      if(pvp!=null && r.bestPrice!=null && descPvp(r.bestPrice,pvp) <= TOL && descPvp(r.myPrice,pvp) <= TOL) flags.push('OPP');
+      // OPORTUNIDAD: solo en publicaciones de CATÁLOGO, que es donde se gana por precio.
+      if(r.matchType==='catalog' && pvp!=null && r.bestPrice!=null && descPvp(r.bestPrice,pvp) <= TOL && descPvp(r.myPrice,pvp) <= TOL) flags.push('OPP');
       if(oferta!=null && r.bestPrice!=null && r.bestPrice < oferta) flags.push('PISAOFERTA');
     }
     let rank=9;
