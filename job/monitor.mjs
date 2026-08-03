@@ -275,7 +275,7 @@ async function main() {
   // 2.5 Precio REAL propio: /items/{id}/sale_price incluye promociones activas.
   // El campo price del multiget es el precio "lleno" (tachado). Reanudable via spDone.
   {
-    const pend = items.filter((it) => !it.spDone);
+    const pend = items.filter((it) => !it.spDone && !it.catalog);
     if (pend.length) console.log(`[monitor] sale_price pendientes: ${pend.length}`);
     let done25 = 0;
     const q25 = [...pend];
@@ -287,7 +287,7 @@ async function main() {
           const sp = await apiGet(`/items/${it.itemId}/sale_price?context=channel_marketplace`);
           if (sp?.amount != null) it.myPrice = sp.amount;
           it.spDone = true;
-        } catch { it.spDone = true; }
+        } catch { /* falló: queda pendiente para reintentar */ }
         done25++;
         if (done25 % 100 === 0) { saveState(); console.log(`[monitor] sale_price ${done25}/${pend.length}`); }
         await sleep(SLEEP_MS);
@@ -367,6 +367,38 @@ async function main() {
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   saveState();
+
+  // 3.9 Precio REAL propio desde el listado de catálogo.
+  // Ese listado ya trae el precio con promociones aplicadas (price) y el lleno
+  // (original_price), y es la MISMA fuente con la que leemos a los competidores,
+  // así que la comparación queda pareja. Evita ~900 llamadas de sale_price.
+  const sinPrecioReal = [];
+  for (const it of items) {
+    const cid = it.catalog || it.catalogAprox;
+    const entry = cid ? catCache.get(cid) : null;
+    const mio = entry?.results?.find((c) => c.item_id === it.itemId);
+    if (mio) {
+      it.priceList = mio.original_price ?? mio.price;   // precio lleno (tachado)
+      it.myPrice = mio.price;                           // precio real que paga el cliente
+    } else if (it.catalog && !it.spDone) {
+      sinPrecioReal.push(it);   // no aparecí entre los 50 más baratos: consulto puntual
+    }
+  }
+  if (sinPrecioReal.length) {
+    console.log(`[monitor] sale_price puntual para ${sinPrecioReal.length} items de catálogo`);
+    const q39 = [...sinPrecioReal];
+    async function spWorker2() {
+      while (q39.length) {
+        const it = q39.shift();
+        try {
+          const sp = await apiGet(`/items/${it.itemId}/sale_price?context=channel_marketplace`);
+          if (sp?.amount != null) { it.priceList = sp.regular_amount ?? it.myPrice; it.myPrice = sp.amount; it.spDone = true; }
+        } catch {}
+        await sleep(SLEEP_MS);
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, spWorker2));
+  }
 
   // 4. Armar filas de salida
   const rows = [];
