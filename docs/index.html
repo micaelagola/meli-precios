@@ -50,6 +50,10 @@
   .diff-neg{color:var(--red);font-weight:600}
   #empty{padding:30px;text-align:center;color:var(--mut)}
   .foot{margin-top:10px;font-size:11px;color:var(--mut)}
+  #prog{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+  .bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:8px}
+  .bar>i{display:block;height:100%;width:0;background:var(--blu);transition:width .8s linear}
+  #refreshBtn{border-color:var(--blu);color:var(--blu);font-weight:600}
 </style>
 </head>
 <body>
@@ -81,9 +85,12 @@
 <div class="toolbar">
   <input id="q" placeholder="Buscar SKU o título…">
   <select id="brand"><option value="">Todas las marcas</option></select>
+  <button id="refreshBtn">🔄 Actualizar ahora</button>
   <button id="exportBtn">⬇ Descargar Excel</button>
   <span class="hint" id="count"></span>
 </div>
+
+<div id="prog"></div>
 
 <table>
   <thead><tr id="hdr">
@@ -429,6 +436,107 @@ function render(){
       <td class="num">${r.totalSellers??'—'}</td>
     </tr>`;
   }).join('');
+}
+
+// ─── Botón "Actualizar ahora" ────────────────────────────────────────────────
+// La página no puede consultar MercadoLibre por sí sola (el navegador lo impide
+// y habría que exponer las credenciales). Lo que hace es pedirle a GitHub que
+// corra el mismo proceso de siempre, y seguir su progreso hasta traer los datos.
+const REPO = 'micaelagola/meli-precios';
+const WF = 'daily.yml';
+const DUR = 260;   // duración típica de una corrida, en segundos
+
+const ghToken = () => localStorage.getItem('ghToken') || '';
+
+$('refreshBtn').addEventListener('click', () => ghToken() ? lanzar() : pedirToken());
+
+function pedirToken(){
+  const p = $('prog'); p.style.display='block';
+  p.innerHTML = '<b>Falta habilitar el permiso (una sola vez)</b>' +
+    '<div class="hint" style="margin:6px 0">Para que este botón pueda pedirle a GitHub que actualice, necesitás generar un permiso. Queda guardado en esta computadora.</div>' +
+    '<ol class="hint" style="margin:0 0 8px 18px">' +
+    '<li>Abrí <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">esta página de GitHub</a></li>' +
+    '<li>Token name: <b>refrescar monitor</b> — Expiration: <b>No expiration</b></li>' +
+    '<li>Repository access: <b>Only select repositories</b> → elegí <b>meli-precios</b></li>' +
+    '<li>Permissions → Repository permissions → <b>Actions</b> → <b>Read and write</b></li>' +
+    '<li>Generate token → copialo y pegalo acá abajo</li></ol>' +
+    '<div style="display:flex;gap:8px"><input id="tk" type="password" placeholder="Pegá el permiso acá" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit">' +
+    '<button id="tkSave">Guardar y actualizar</button></div>';
+  $('tkSave').onclick = () => {
+    const v = $('tk').value.trim();
+    if(!v) return;
+    localStorage.setItem('ghToken', v);
+    lanzar();
+  };
+}
+
+function pintar(titulo, sub, pct, color){
+  $('prog').style.display='block';
+  if(!$('pBar')) $('prog').innerHTML = '<b id="pTit"></b><div class="hint" id="pSub"></div><div class="bar"><i id="pBar"></i></div>';
+  $('pTit').textContent = titulo;
+  $('pSub').innerHTML = sub;
+  if(pct!=null) $('pBar').style.width = pct + '%';
+  if(color) $('pBar').style.background = color;
+}
+
+async function lanzar(){
+  $('prog').innerHTML='';
+  pintar('Pidiendo la actualización…','Conectando con GitHub',3);
+  const desde = new Date(Date.now()-15000).toISOString();
+  try{
+    const r = await fetch('https://api.github.com/repos/'+REPO+'/actions/workflows/'+WF+'/dispatches', {
+      method:'POST',
+      headers:{ Authorization:'Bearer '+ghToken(), Accept:'application/vnd.github+json' },
+      body: JSON.stringify({ ref:'main' })
+    });
+    if(r.status===401 || r.status===403){
+      localStorage.removeItem('ghToken');
+      throw new Error('El permiso no es válido o le faltan atribuciones. Volvé a tocar Actualizar y generalo de nuevo.');
+    }
+    if(!r.ok) throw new Error('GitHub respondió ' + r.status);
+    seguir(desde, Date.now());
+  }catch(e){
+    pintar('No se pudo iniciar', e.message, 0, 'var(--red)');
+  }
+}
+
+async function seguir(desde, t0){
+  let runId = null;
+  const paso = async () => {
+    const seg = (Date.now()-t0)/1000;
+    try{
+      const H = { headers:{ Authorization:'Bearer '+ghToken() }, cache:'no-store' };
+      if(!runId){
+        const d = await (await fetch('https://api.github.com/repos/'+REPO+'/actions/workflows/'+WF+'/runs?per_page=5', H)).json();
+        const r = (d.workflow_runs||[]).find(x => x.created_at >= desde);
+        if(r) runId = r.id;
+      }
+      if(runId){
+        const run = await (await fetch('https://api.github.com/repos/'+REPO+'/actions/runs/'+runId, H)).json();
+        if(run.status === 'completed'){
+          if(run.conclusion === 'success') return traerDatos();
+          return pintar('La actualización falló','Mirá el detalle en <a href="'+run.html_url+'" target="_blank">GitHub</a>', 100, 'var(--red)');
+        }
+        pintar(run.status==='queued' ? 'En cola, esperando una máquina…' : 'Revisando precios en MercadoLibre…',
+               'Llevamos ' + Math.floor(seg) + ' segundos de unos ' + DUR + '. Podés seguir usando la app mientras tanto.',
+               Math.min(94, 3 + (seg/DUR)*91));
+      }
+    }catch(e){ /* reintenta en el próximo ciclo */ }
+    setTimeout(paso, 5000);
+  };
+  paso();
+}
+
+async function traerDatos(){
+  pintar('Trayendo los datos nuevos…','Casi listo', 97);
+  try{
+    const d = await (await fetch('https://raw.githubusercontent.com/'+REPO+'/main/docs/data.json?x='+Date.now(), {cache:'no-store'})).json();
+    DATA = d; build();
+    pintar('✓ Datos actualizados', 'Corrida de las ' + new Date(d.generatedAt).toLocaleTimeString('es-AR'), 100, 'var(--grn)');
+    setTimeout(()=>{ $('prog').style.display='none'; $('prog').innerHTML=''; }, 8000);
+  }catch(e){
+    pintar('Terminó, pero no pude leer los datos','Recargá la página con Ctrl+F5', 100, 'var(--org)');
+  }
 }
 </script>
 </body>
