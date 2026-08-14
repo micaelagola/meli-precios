@@ -244,7 +244,7 @@ async function main() {
   for (let i = 0; i < ids.length; i += 20) {
     const d = await apiGet(
       `/items?ids=${ids.slice(i, i + 20).join(',')}` +
-      `&attributes=id,title,price,seller_custom_field,catalog_product_id,permalink,attributes,available_quantity`
+      `&attributes=id,title,price,seller_custom_field,catalog_product_id,permalink,attributes,available_quantity,sold_quantity,date_created`
     );
     for (const it of d) {
       if (it.code !== 200 || !it.body) continue;
@@ -264,6 +264,8 @@ async function main() {
         catalog: b.catalog_product_id || null,
         link: b.permalink || itemLink(b.id),
         stock: b.available_quantity ?? null,
+        vendidos: b.sold_quantity ?? null,   // acumulado histórico de esa publicación
+        creada: (b.date_created || '').slice(0, 10),
       });
     }
     await sleep(SLEEP_MS);
@@ -387,6 +389,7 @@ async function main() {
   if (sinPrecioReal.length) {
     console.log(`[monitor] sale_price puntual para ${sinPrecioReal.length} items de catálogo`);
     const q39 = [...sinPrecioReal];
+    let hechos39 = 0;
     async function spWorker2() {
       while (q39.length) {
         const it = q39.shift();
@@ -394,10 +397,12 @@ async function main() {
           const sp = await apiGet(`/items/${it.itemId}/sale_price?context=channel_marketplace`);
           if (sp?.amount != null) { it.priceList = sp.regular_amount ?? it.myPrice; it.myPrice = sp.amount; it.spDone = true; }
         } catch {}
+        if (++hechos39 % 100 === 0) saveState();
         await sleep(SLEEP_MS);
       }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, spWorker2));
+    saveState();
   }
 
   // 4. Armar filas de salida
@@ -452,6 +457,82 @@ async function main() {
     for (const c of r.cheapers ?? []) c.seller = nickCache.get(c.sellerId) ?? String(c.sellerId);
   }
 
+  // ─── 7. VENTAS: cuándo vendió por última vez cada SKU ──────────────────────
+  // Fuente 1 (preferida): la API de órdenes de MELI, con fechas exactas.
+  // Fuente 2 (respaldo):  historial propio. Cada corrida anotamos el acumulado de
+  //   ventas de cada publicación; si sube, ese día hubo venta. No pide permisos.
+  const HIST_FILE = path.join(__dirname, '..', 'docs', 'historial.json');
+  const hoyISO = new Date().toISOString().slice(0, 10);
+  const ventas = { fuente: null, motivo: null, desde: null, porSku: {} };
+
+  try {
+    const desde = new Date(Date.now() - 90 * 864e5).toISOString();
+    const porItem = new Map();
+    let offset = 0, total = null;
+    while (offset < 3000) {
+      const d = await apiGet(`/orders/search?seller=${SELLER_ID}&order.date_created.from=${desde}&sort=date_desc&offset=${offset}&limit=50`);
+      total = d.paging?.total ?? 0;
+      for (const o of (d.results ?? [])) {
+        const fecha = (o.date_closed || o.date_created || '').slice(0, 10);
+        for (const oi of (o.order_items ?? [])) {
+          const id = oi.item?.id;
+          if (!id || !fecha) continue;
+          const prev = porItem.get(id);
+          if (!prev || fecha > prev) porItem.set(id, fecha);
+        }
+      }
+      offset += 50;
+      if (offset >= total) break;
+      await sleep(SLEEP_MS);
+    }
+    ventas.fuente = 'meli';
+    ventas.desde = desde.slice(0, 10);
+    for (const it of items) { const f = porItem.get(it.itemId); if (f) it.ultimaVenta = f; }
+    console.log(`[monitor] ventas desde MELI: ${total} órdenes en 90 días`);
+  } catch (e) {
+    ventas.fuente = 'historial';
+    ventas.motivo = String(e.message || e).slice(0, 120);
+    console.log(`[monitor] órdenes no disponibles -> uso historial propio`);
+  }
+
+  let hist = {};
+  try { hist = JSON.parse(fs.readFileSync(HIST_FILE, 'utf8')); } catch {}
+  for (const it of items) {
+    if (it.vendidos == null) continue;
+    const prev = hist[it.itemId];
+    if (!prev) hist[it.itemId] = { q: it.vendidos, ult: hoyISO, desde: hoyISO };
+    else if (it.vendidos > prev.q) hist[it.itemId] = { q: it.vendidos, ult: hoyISO, desde: prev.desde };
+    else hist[it.itemId] = { q: prev.q, ult: prev.ult, desde: prev.desde };
+  }
+  const vivos = new Set(items.map((x) => x.itemId));
+  for (const k of Object.keys(hist)) if (!vivos.has(k)) delete hist[k];
+  fs.mkdirSync(path.dirname(HIST_FILE), { recursive: true });
+  fs.writeFileSync(HIST_FILE, JSON.stringify(hist));
+
+  if (ventas.fuente === 'historial') {
+    const desdes = Object.values(hist).map((h) => h.desde).filter(Boolean).sort();
+    ventas.desde = desdes[0] ?? hoyISO;
+    for (const it of items) { const h = hist[it.itemId]; if (h) it.ultimaVenta = h.ult; }
+  }
+
+  // Agrupo por SKU: un producto está parado solo si NINGUNA de sus publicaciones vendió.
+  // Los SKU de OUTLET quedan afuera.
+  for (const it of items) {
+    const sku = it.sku;
+    if (!sku) continue;
+    const texto = `${it.skuRaw ?? ''} ${it.model ?? ''} ${it.title ?? ''}`.toUpperCase();
+    if (texto.includes('OUTLET')) continue;
+    const v = ventas.porSku[sku] ?? { ultima: null, pubs: 0, vendidos: 0, desde: null, creada: null };
+    v.pubs++;
+    v.vendidos += it.vendidos ?? 0;
+    if (it.creada && (!v.creada || it.creada > v.creada)) v.creada = it.creada;
+    if (it.ultimaVenta && (!v.ultima || it.ultimaVenta > v.ultima)) v.ultima = it.ultimaVenta;
+    const dd = hist[it.itemId]?.desde;
+    if (dd && (!v.desde || dd < v.desde)) v.desde = dd;
+    ventas.porSku[sku] = v;
+  }
+  console.log(`[monitor] ventas (${ventas.fuente}): ${Object.keys(ventas.porSku).length} SKU`);
+
   // 6. Guardar
   const out = {
     generatedAt: new Date().toISOString(),
@@ -459,6 +540,7 @@ async function main() {
     totalItems: rows.length,
     withCatalog: rows.filter((r) => r.catalog).length,
     withAprox: rows.filter((r) => !r.catalog && r.catalogAprox).length,
+    ventas,
     rows,
   };
   fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });
