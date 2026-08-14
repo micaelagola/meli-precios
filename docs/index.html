@@ -54,6 +54,11 @@
   .bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:8px}
   .bar>i{display:block;height:100%;width:0;background:var(--blu);transition:width .8s linear}
   #refreshBtn{border-color:var(--blu);color:var(--blu);font-weight:600}
+  tr.skuRow{cursor:pointer}
+  tr.skuRow td{font-weight:500}
+  tr.subRow td{background:#fbfcfd;font-size:12.5px;padding-left:22px}
+  .t-parado{background:#fdf2f8;color:#be185d}
+  .aviso{background:var(--org-bg);border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px}
 </style>
 </head>
 <body>
@@ -91,6 +96,7 @@
 </div>
 
 <div id="prog"></div>
+<div class="aviso" id="avisoParados" style="display:none"></div>
 
 <table>
   <thead><tr id="hdr">
@@ -118,6 +124,8 @@ const fmt = (n)=> n==null ? '—' : '$'+Math.round(n).toLocaleString('es-AR');
 const norm = (s)=> s ? String(s).toUpperCase().replace(/[^A-Z0-9]/g,'') : null;
 
 let DATA=null, ROWS=[], FILTER='all', SORTK='flagRank', SORTD=1, Q='';
+const DIAS_PARADO = 15;   // un producto se considera parado tras 15 días sin vender
+const diasDesde = (iso)=> iso ? Math.floor((Date.now()-new Date(iso+'T12:00:00'))/864e5) : null;
 // Descuento tolerado sobre el PVP: hasta 5% admitido. Infracción = MÁS de 5% abajo.
 const TOL = 0.05;
 const EPS = 0.0005;
@@ -339,7 +347,43 @@ function build(){
     if(flags.includes('SINCAT')) rank=Math.max(rank,8);
     return {...r, pvp, oferta, marca:marcaDe(r), pctBajoPvp:pctPvp(r.bestPrice,pvp), flags, flagRank:rank};
   });
+  armarParados();
   renderBrands(); renderStats(); render();
+}
+
+// Agrupa por SKU: un producto está parado solo si NINGUNA de sus publicaciones vendió.
+// Los SKU con OUTLET quedan afuera.
+let PARADOS = [];
+function armarParados(){
+  PARADOS = [];
+  const v = DATA.ventas;
+  if(!v || !v.porSku) return;
+  const porSku = new Map();
+  for(const r of ROWS){
+    if(!r.sku) continue;
+    const txt = ((r.skuRaw||'')+' '+(r.model||'')+' '+(r.title||'')).toUpperCase();
+    if(txt.includes('OUTLET')) continue;
+    const g = porSku.get(r.sku) || { sku:r.sku, skuRaw:r.skuRaw||r.model, marca:r.marca, pubs:[] };
+    g.pubs.push(r);
+    porSku.set(r.sku, g);
+  }
+  for(const g of porSku.values()){
+    const info = v.porSku[g.sku];
+    if(!info) continue;
+    // 1) nunca vendió nada: se sabe desde el día uno, contando desde que se publicó
+    // 2) vendió alguna vez: uso la fecha de la última venta
+    // 3) todavía sin historial: cuento desde que empezamos a medir
+    let dias, tipo;
+    if(info.vendidos === 0){ dias = diasDesde(info.creada) ?? 0; tipo='nunca'; }
+    else if(info.ultima){ dias = diasDesde(info.ultima); tipo='ultima'; }
+    else { dias = diasDesde(info.desde ?? v.desde); tipo='midiendo'; }
+    if(dias!=null && dias >= DIAS_PARADO){
+      g.dias=dias; g.tipo=tipo; g.ultima=info.ultima; g.vendidosTotal=info.vendidos;
+      g.stock = g.pubs.reduce((s,r)=>s+(r.stock||0),0);
+      PARADOS.push(g);
+    }
+  }
+  PARADOS.sort((x,y)=>y.dias-x.dias);
 }
 
 function marcaDe(r){
@@ -376,6 +420,7 @@ function renderStats(){
     ['OPP','🔵 Oportunidad',c('OPP')],
     ['GANA','🟢 Ganando',c('GANA')],
     ['SINCAT','Sin catálogo',c('SINCAT')],
+    ['PARADOS','⏸ Sin vender +'+DIAS_PARADO+'d', PARADOS.length],
   ];
   $('stats').innerHTML=defs.map(([k,l,n])=>`<div class="stat ${FILTER===k?'on':''}" data-f="${k}"><b>${n}</b><span>${l}</span></div>`).join('');
   document.querySelectorAll('.stat').forEach(el=>el.onclick=()=>{FILTER=el.dataset.f;renderStats();render();});
@@ -451,7 +496,52 @@ function listaCompetidores(r){
   }).join('');
 }
 
+// Vista especial: una fila por SKU parado, desplegable a sus publicaciones.
+function renderParados(){
+  const b=$('brand').value;
+  let lista = b ? PARADOS.filter(g=>g.marca===b) : PARADOS;
+  if(Q) lista = lista.filter(g=>(g.sku||'').includes(Q)||(g.skuRaw||'').toUpperCase().includes(Q)||g.pubs.some(r=>r.title.toUpperCase().includes(Q)));
+  $('count').textContent = lista.length+' productos';
+  $('empty').style.display = lista.length?'none':'block';
+  const v = DATA.ventas||{};
+  const nota = v.fuente==='meli'
+    ? 'Ventas leídas directamente de MercadoLibre (últimos 90 días).'
+    : 'MercadoLibre no habilita la lectura de ventas para esta app, así que el monitor lleva su propio registro: cada corrida compara cuánto vendió cada publicación. Medimos desde el '+(v.desde||'—')+'. Los que nunca vendieron nada se detectan igual desde el día uno.';
+  $('avisoParados').style.display='block';
+  $('avisoParados').innerHTML = '<b>Productos sin ventas hace '+DIAS_PARADO+' días o más</b> (por SKU, sumando todas sus publicaciones; excluye OUTLET). '+nota;
+  $('tb').innerHTML = lista.map(function(g,i){
+    const detalle = g.pubs.map(function(r){
+      return '<tr class="subRow" data-g="'+i+'"><td></td><td class="sku">'+(r.skuRaw??'—')+'</td><td class="hint">'+(r.marca??'')+'</td>'+
+      '<td class="title-cell"><a href="'+r.link+'" target="_blank">'+r.title+'</a></td>'+
+      '<td class="num">'+fmt(r.myPrice)+'</td><td class="num">'+fmt(r.pvp)+'</td>'+
+      '<td class="num hint">stock '+(r.stock??'—')+'</td>'+
+      '<td colspan="3" class="hint">'+(r.vendidos!=null? r.vendidos+' vendidos en total':'')+'</td></tr>';
+    }).join('');
+    const etiqueta = g.tipo==='nunca' ? 'nunca vendió ('+g.dias+' días publicado)'
+      : g.tipo==='ultima' ? 'hace '+g.dias+' días' : 'sin ventas desde que medimos ('+g.dias+'d)';
+    return '<tr class="skuRow" data-i="'+i+'">'+
+      '<td><span class="tag t-parado">⏸ '+etiqueta+'</span></td>'+
+      '<td class="sku">'+(g.skuRaw??g.sku)+'</td><td class="hint">'+(g.marca??'')+'</td>'+
+      '<td class="title-cell">'+g.pubs[0].title+'</td>'+
+      '<td class="num">'+fmt(g.pubs[0].myPrice)+'</td><td class="num">'+fmt(g.pubs[0].pvp)+'</td>'+
+      '<td class="num">'+g.pubs.length+' public.</td>'+
+      '<td class="hint">stock total '+g.stock+'</td>'+
+      '<td class="num hint" colspan="2">▸ ver publicaciones</td></tr>' + detalle;
+  }).join('');
+  document.querySelectorAll('#tb tr.subRow').forEach(function(tr){ tr.style.display='none'; });
+  document.querySelectorAll('#tb tr.skuRow').forEach(function(tr){
+    tr.onclick=function(){
+      const i=tr.dataset.i;
+      document.querySelectorAll('#tb tr.subRow[data-g="'+i+'"]').forEach(function(x){
+        x.style.display = x.style.display==='none' ? '' : 'none';
+      });
+    };
+  });
+}
+
 function render(){
+  if(FILTER==='PARADOS') return renderParados();
+  $('avisoParados').style.display='none';
   let rows=baseRows();
   if(FILTER!=='all') rows=rows.filter(r=>r.flags.includes(FILTER));
   if(Q) rows=rows.filter(r=>(r.sku||'').includes(Q)||(r.skuRaw||'').toUpperCase().includes(Q)||r.title.toUpperCase().includes(Q));
